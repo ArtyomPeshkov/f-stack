@@ -726,14 +726,41 @@ init_port_start(void)
                 /* Enable HW CRC stripping */
                 port_conf.rxmode.offloads &= ~RTE_ETH_RX_OFFLOAD_KEEP_CRC;
 
-                /* FIXME: Enable TCP LRO ?*/
-                #if 0
-                if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_LRO) {
-                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is supported\n");
-                    port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_TCP_LRO;
-                    pconf->hw_features.rx_lro = 1;
+                /* Set TCP LRO (Large Receive Offload) */
+                if (ff_global_cfg.dpdk.lro) {
+                    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TCP_LRO) {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is supported\n");
+                        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TCP_LRO;
+
+                        /*
+                         * A coalesced LRO packet is much larger than the mbuf
+                         * data room, so it is delivered as a chain of mbufs.
+                         * Scatter RX must be enabled for the PMD to hand up
+                         * multi-segment packets (e.g. mlx5 rejects the rx queue
+                         * setup with ENOSPC otherwise).
+                         */
+                        if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_SCATTER) {
+                            port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_SCATTER;
+                        }
+
+                        /*
+                         * Cap the maximum coalesced packet size to what the
+                         * device reports. When the device does not report a
+                         * value, leave it 0 and let DPDK derive the default
+                         * from the MTU.
+                         */
+                        if (dev_info.max_lro_pkt_size) {
+                            port_conf.rxmode.max_lro_pkt_size =
+                                dev_info.max_lro_pkt_size;
+                        }
+
+                        pconf->hw_features.rx_lro = 1;
+                    } else {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is not supported\n");
+                    }
+                } else {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is disabled\n");
                 }
-                #endif
 
                 /* Set Rx checksum checking */
                 if ((dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) &&

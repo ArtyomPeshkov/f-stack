@@ -843,6 +843,9 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     if (cfg->hw_features.rx_csum) {
         ifp->if_capabilities |= IFCAP_RXCSUM;
     }
+    if (cfg->hw_features.rx_lro) {
+        ifp->if_capabilities |= IFCAP_LRO;
+    }
     if (cfg->hw_features.tx_csum_ip) {
         ifp->if_capabilities |= IFCAP_TXCSUM;
         ifp->if_hwassist |= CSUM_IP;
