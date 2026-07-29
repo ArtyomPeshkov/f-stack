@@ -373,6 +373,12 @@ static inline void ff_offload_set(struct ff_dpdk_if_context *ctx, void *m, struc
             head->l3_len = iph_len;
         }
     }
+
+    /* Hardware VLAN tag insertion (see ff_dpdk_if_send). */
+    if (offload.vlan_tag) {
+        head->vlan_tci = offload.vlan_tci;
+        head->ol_flags |= RTE_MBUF_F_TX_VLAN;
+    }
 }
 
 // create rte_buf refer to data which is transmit from bsd stack by EXT_CLUSTER.

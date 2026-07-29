@@ -806,6 +806,18 @@ init_port_start(void)
                     ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TSO is disabled\n");
                 }
 
+                /*
+                 * Enable hardware VLAN tag insertion on TX. This lets VLAN
+                 * sub-interfaces (if_vlan) offload tagging to the NIC, which
+                 * in turn allows them to inherit the checksum/TSO/LRO offloads
+                 * from this parent port (see ff_veth_setup_interface).
+                 */
+                if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_VLAN_INSERT) {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is supported\n");
+                    port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+                    pconf->hw_features.tx_vlan_insert = 1;
+                }
+
                 if (dev_info.reta_size) {
                     /* reta size must be power of 2 */
                     assert((dev_info.reta_size & (dev_info.reta_size - 1)) == 0);
@@ -2255,6 +2267,16 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
             head->l2_len = RTE_ETHER_HDR_LEN;
             head->l3_len = iph_len;
         }
+    }
+
+    /*
+     * Hardware VLAN tag insertion. The FreeBSD if_vlan layer offloads tagging
+     * (M_VLANTAG) to the parent, leaving the L2/L3 headers contiguous, so the
+     * checksum/TSO offsets above stay correct. The NIC inserts the 802.1Q tag.
+     */
+    if (offload.vlan_tag) {
+        head->vlan_tci = offload.vlan_tci;
+        head->ol_flags |= RTE_MBUF_F_TX_VLAN;
     }
 
     ff_mbuf_free(m);

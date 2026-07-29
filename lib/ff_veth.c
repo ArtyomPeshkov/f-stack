@@ -290,6 +290,11 @@ ff_mbuf_tx_offload(void *m, struct ff_tx_offload *offload)
     if (mb->m_pkthdr.csum_flags & CSUM_TSO) {
         offload->tso_seg_size = mb->m_pkthdr.tso_segsz;
     }
+
+    if (mb->m_flags & M_VLANTAG) {
+        offload->vlan_tag = 1;
+        offload->vlan_tci = mb->m_pkthdr.ether_vtag;
+    }
 }
 
 void
@@ -856,6 +861,32 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     if (cfg->hw_features.tx_tso) {
         ifp->if_capabilities |= IFCAP_TSO;
         ifp->if_hwassist |= CSUM_TSO;
+    }
+
+    /*
+     * Advertise hardware VLAN offloads so that VLAN sub-interfaces created on
+     * top of this port (via if_vlan) inherit the checksum/TSO/LRO offloads.
+     * This is gated on hardware VLAN tag insertion being available on TX: with
+     * it, if_vlan offloads tagging (M_VLANTAG) instead of prepending an inline
+     * 802.1Q header, so the L2/L3 layout stays contiguous and the existing
+     * checksum/TSO offset handling in ff_dpdk_if_send() remains valid.
+     * Without it, none of the VLAN_HW* capabilities are advertised and VLAN
+     * traffic falls back to software offloads, as before.
+     */
+    if (cfg->hw_features.tx_vlan_insert) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING | IFCAP_VLAN_MTU;
+
+        /*
+         * IFCAP_VLAN_HWCSUM lets the VLAN inherit RX/TX checksum offload and,
+         * per vlan_capabilities(), also gates LRO propagation to the VLAN.
+         */
+        if (cfg->hw_features.rx_csum || cfg->hw_features.tx_csum_ip ||
+            cfg->hw_features.tx_csum_l4) {
+            ifp->if_capabilities |= IFCAP_VLAN_HWCSUM;
+        }
+        if (cfg->hw_features.tx_tso) {
+            ifp->if_capabilities |= IFCAP_VLAN_HWTSO;
+        }
     }
 
     ifp->if_capenable = ifp->if_capabilities;
