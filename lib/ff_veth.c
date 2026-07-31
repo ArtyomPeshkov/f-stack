@@ -864,26 +864,29 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     }
 
     /*
-     * Advertise hardware VLAN offloads so that VLAN sub-interfaces created on
-     * top of this port (via if_vlan) inherit the checksum/TSO/LRO offloads.
-     * This is gated on hardware VLAN tag insertion being available on TX: with
-     * it, if_vlan offloads tagging (M_VLANTAG) instead of prepending an inline
-     * 802.1Q header, so the L2/L3 layout stays contiguous and the existing
-     * checksum/TSO offset handling in ff_dpdk_if_send() remains valid.
-     * Without it, none of the VLAN_HW* capabilities are advertised and VLAN
-     * traffic falls back to software offloads, as before.
+     * LRO inheritance to a VLAN sub-interface keys off IFCAP_VLAN_HWCSUM (see
+     * vlan_capabilities()). LRO is RX-side coalescing done by the NIC, so it
+     * does not depend on hardware VLAN tag insertion; advertise it whenever the
+     * parent can do checksum offload. The VLAN only actually ends up with
+     * IFCAP_LRO if the parent itself has it (i.e. lro=1). FreeBSD only *enables*
+     * hardware VLAN checksum when IFCAP_VLAN_HWTAGGING is also set, so without
+     * vlan_insert this grants LRO only and leaves VLAN checksums in software.
+     */
+    if (cfg->hw_features.rx_csum || cfg->hw_features.tx_csum_ip ||
+        cfg->hw_features.tx_csum_l4) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWCSUM;
+    }
+
+    /*
+     * Hardware VLAN tag insertion. With it, if_vlan offloads tagging
+     * (M_VLANTAG) instead of prepending an inline 802.1Q header, so the L2/L3
+     * layout stays contiguous and the checksum/TSO offset handling in
+     * ff_dpdk_if_send() remains valid. This is what lets a VLAN inherit
+     * hardware checksum offload (see vlan_capabilities()).
      */
     if (cfg->hw_features.tx_vlan_insert) {
         ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING | IFCAP_VLAN_MTU;
 
-        /*
-         * IFCAP_VLAN_HWCSUM lets the VLAN inherit RX/TX checksum offload and,
-         * per vlan_capabilities(), also gates LRO propagation to the VLAN.
-         */
-        if (cfg->hw_features.rx_csum || cfg->hw_features.tx_csum_ip ||
-            cfg->hw_features.tx_csum_l4) {
-            ifp->if_capabilities |= IFCAP_VLAN_HWCSUM;
-        }
         if (cfg->hw_features.tx_tso) {
             ifp->if_capabilities |= IFCAP_VLAN_HWTSO;
         }
