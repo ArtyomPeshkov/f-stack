@@ -282,6 +282,7 @@ struct ff_config {
         int lro;
         int tx_csum_offoad_skip;
         int vlan_strip;
+        int vlan_insert;
         int nb_vlan_filter;
         uint16_t vlan_filter_id[DPDK_MAX_VLAN_FILTER];
         int symmetric_rss;

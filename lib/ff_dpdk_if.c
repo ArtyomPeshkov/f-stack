@@ -820,11 +820,20 @@ init_port_start(void)
                  * sub-interfaces (if_vlan) offload tagging to the NIC, which
                  * in turn allows them to inherit the checksum/TSO/LRO offloads
                  * from this parent port (see ff_veth_setup_interface).
+                 * Gated by config: enabling it switches VLAN sub-interfaces
+                 * from software inline tagging to hardware tagging, so it is
+                 * opt-in to preserve the previous behavior by default.
                  */
-                if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_VLAN_INSERT) {
-                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is supported\n");
-                    port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
-                    pconf->hw_features.tx_vlan_insert = 1;
+                if (ff_global_cfg.dpdk.vlan_insert) {
+                    if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_VLAN_INSERT) {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is supported\n");
+                        port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+                        pconf->hw_features.tx_vlan_insert = 1;
+                    } else {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is not supported\n");
+                    }
+                } else {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is disabled\n");
                 }
 
                 if (dev_info.reta_size) {
