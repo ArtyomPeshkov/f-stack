@@ -316,27 +316,40 @@ static inline void ff_offload_set(struct ff_dpdk_if_context *ctx, void *m, struc
     ff_mbuf_tx_offload(m, &offload);
     data = rte_pktmbuf_mtod(head, void*);
 
+    /* See ff_dpdk_if_send(): account for an inline 802.1Q VLAN header. */
+    uint16_t l2_len = RTE_ETHER_HDR_LEN;
+    {
+        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)data;
+        uint16_t etype = rte_be_to_cpu_16(eth->ether_type);
+        while (etype == RTE_ETHER_TYPE_VLAN || etype == RTE_ETHER_TYPE_QINQ) {
+            struct rte_vlan_hdr *vh =
+                (struct rte_vlan_hdr *)((char *)data + l2_len);
+            etype = rte_be_to_cpu_16(vh->eth_proto);
+            l2_len += sizeof(struct rte_vlan_hdr);
+        }
+    }
+
     if (offload.ip_csum) {
         /* ipv6 not supported yet */
         struct rte_ipv4_hdr *iph;
         int iph_len;
-        iph = (struct rte_ipv4_hdr *)(data + RTE_ETHER_HDR_LEN);
+        iph = (struct rte_ipv4_hdr *)(data + l2_len);
         iph_len = (iph->version_ihl & 0x0f) << 2;
 
         head->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
-        head->l2_len = RTE_ETHER_HDR_LEN;
+        head->l2_len = l2_len;
         head->l3_len = iph_len;
     }
 
     if (ctx->hw_features.tx_csum_l4) {
         struct rte_ipv4_hdr *iph;
         int iph_len;
-        iph = (struct rte_ipv4_hdr *)(data + RTE_ETHER_HDR_LEN);
+        iph = (struct rte_ipv4_hdr *)(data + l2_len);
         iph_len = (iph->version_ihl & 0x0f) << 2;
 
         if (offload.tcp_csum) {
             head->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
-            head->l2_len = RTE_ETHER_HDR_LEN;
+            head->l2_len = l2_len;
             head->l3_len = iph_len;
         }
 
@@ -363,13 +376,27 @@ static inline void ff_offload_set(struct ff_dpdk_if_context *ctx, void *m, struc
             tcph->cksum = rte_ipv4_phdr_cksum(iph, RTE_MBUF_F_TX_TCP_SEG);
 
             head->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
+            /*
+             * A VLAN sub-interface without hardware tagging carries only
+             * CSUM_TSO (VLAN checksum offload requires hardware tagging), so
+             * the ip_csum/tcp_csum branches above may not have run. Set the
+             * IPv4/IP-checksum flags and l2_len/l3_len here so TSO always gets
+             * a complete header description.
+             */
+            if (iph->version == 4) {
+                head->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
+            } else {
+                head->ol_flags |= RTE_MBUF_F_TX_IPV6;
+            }
+            head->l2_len = l2_len;
+            head->l3_len = iph_len;
             head->l4_len = tcph_len;
             head->tso_segsz = offload.tso_seg_size;
         }
 
         if (offload.udp_csum) {
             head->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
-            head->l2_len = RTE_ETHER_HDR_LEN;
+            head->l2_len = l2_len;
             head->l3_len = iph_len;
         }
     }

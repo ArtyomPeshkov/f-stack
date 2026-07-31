@@ -878,18 +878,25 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     }
 
     /*
+     * TSO inheritance to a VLAN keys off IFCAP_VLAN_HWTSO and, per
+     * vlan_capabilities(), "does not necessarily require hardware VLAN
+     * tagging". The TX offload path (ff_dpdk_if_send / ff_offload_set) parses
+     * an inline 802.1Q header when computing l2_len, so TSO works whether the
+     * VLAN tags in software (inline) or offloads tagging to the NIC. Advertise
+     * it whenever the parent has TSO, independent of vlan_insert.
+     */
+    if (cfg->hw_features.tx_tso) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWTSO;
+    }
+
+    /*
      * Hardware VLAN tag insertion. With it, if_vlan offloads tagging
-     * (M_VLANTAG) instead of prepending an inline 802.1Q header, so the L2/L3
-     * layout stays contiguous and the checksum/TSO offset handling in
-     * ff_dpdk_if_send() remains valid. This is what lets a VLAN inherit
-     * hardware checksum offload (see vlan_capabilities()).
+     * (M_VLANTAG) instead of prepending an inline 802.1Q header. This is what
+     * additionally lets a VLAN inherit hardware checksum offload (see
+     * vlan_capabilities(), which requires IFCAP_VLAN_HWTAGGING for csum).
      */
     if (cfg->hw_features.tx_vlan_insert) {
         ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING | IFCAP_VLAN_MTU;
-
-        if (cfg->hw_features.tx_tso) {
-            ifp->if_capabilities |= IFCAP_VLAN_HWTSO;
-        }
     }
 
     ifp->if_capenable = ifp->if_capabilities;
