@@ -654,6 +654,37 @@ init_port_start(void)
                     "Error during getting device (port %u) info: %s\n",
                     port_id, strerror(-ret));
 
+            /*
+             * A bonding port attaches its member ports -- and only then
+             * inherits their offload capabilities -- inside its own
+             * dev_configure() (bond_ethdev_configure() ->
+             * rte_eth_bond_member_add()). rte_eth_dev_configure() validates the
+             * requested offloads against dev_info *before* invoking that PMD
+             * callback, and the rte_eth_dev_info_get() above runs before any
+             * configure at all, so a not-yet-configured bond reports an empty
+             * capability set (e.g. "TX VLAN insert offload is not supported").
+             * Configure the bond once with a null config so the members
+             * attach, then re-read dev_info to obtain the real member-derived
+             * capabilities before the offload decisions below. The regular
+             * rte_eth_dev_configure() further down then re-applies the chosen
+             * offloads against the now-correct capability set (its repeated
+             * member-add is a harmless no-op that only logs).
+             */
+            if (nb_slaves > 0 && port_id == u_port_id &&
+                rte_eal_process_type() == RTE_PROC_PRIMARY) {
+                struct rte_eth_conf null_conf = {0};
+                ret = rte_eth_dev_configure(port_id, nb_queues, nb_queues,
+                    &null_conf);
+                if (ret != 0) {
+                    return ret;
+                }
+                ret = rte_eth_dev_info_get(port_id, &dev_info);
+                if (ret != 0)
+                    rte_exit(EXIT_FAILURE,
+                        "Error during getting device (port %u) info: %s\n",
+                        port_id, strerror(-ret));
+            }
+
             if (nb_queues > dev_info.max_rx_queues) {
                 rte_exit(EXIT_FAILURE, "num_procs[%d] bigger than max_rx_queues[%d]\n",
                     nb_queues,
