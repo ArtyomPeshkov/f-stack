@@ -648,11 +648,7 @@ init_port_start(void)
             struct rte_eth_rxconf rxq_conf;
             struct rte_eth_txconf txq_conf;
 
-            int ret = rte_eth_dev_info_get(port_id, &dev_info);
-            if (ret != 0)
-                rte_exit(EXIT_FAILURE,
-                    "Error during getting device (port %u) info: %s\n",
-                    port_id, strerror(-ret));
+            int ret;
 
             /*
              * A bonding port attaches its member ports -- and only then
@@ -660,12 +656,11 @@ init_port_start(void)
              * dev_configure() (bond_ethdev_configure() ->
              * rte_eth_bond_member_add()). rte_eth_dev_configure() validates the
              * requested offloads against dev_info *before* invoking that PMD
-             * callback, and the rte_eth_dev_info_get() above runs before any
-             * configure at all, so a not-yet-configured bond reports an empty
+             * callback, so a not-yet-configured bond reports an empty
              * capability set (e.g. "TX VLAN insert offload is not supported").
-             * Configure the bond once with a null config so the members
-             * attach, then re-read dev_info to obtain the real member-derived
-             * capabilities before the offload decisions below. The regular
+             * Configure the bond once with a null config first so the members
+             * attach, so the rte_eth_dev_info_get() below returns the real
+             * member-derived capabilities instead of an empty set. The regular
              * rte_eth_dev_configure() further down then re-applies the chosen
              * offloads against the now-correct capability set (its repeated
              * member-add is a harmless no-op that only logs).
@@ -678,12 +673,13 @@ init_port_start(void)
                 if (ret != 0) {
                     return ret;
                 }
-                ret = rte_eth_dev_info_get(port_id, &dev_info);
-                if (ret != 0)
-                    rte_exit(EXIT_FAILURE,
-                        "Error during getting device (port %u) info: %s\n",
-                        port_id, strerror(-ret));
             }
+
+            ret = rte_eth_dev_info_get(port_id, &dev_info);
+            if (ret != 0)
+                rte_exit(EXIT_FAILURE,
+                    "Error during getting device (port %u) info: %s\n",
+                    port_id, strerror(-ret));
 
             if (nb_queues > dev_info.max_rx_queues) {
                 rte_exit(EXIT_FAILURE, "num_procs[%d] bigger than max_rx_queues[%d]\n",
