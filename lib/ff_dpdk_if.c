@@ -615,6 +615,7 @@ init_port_start(void)
         struct ff_port_cfg *pconf = NULL;
         uint16_t nb_queues;
         int nb_slaves;
+        uint32_t lro_max_pkt_size = 0;
 
         if (i < nb_ports) {
             u_port_id = ff_global_cfg.dpdk.portid_list[i];
@@ -647,7 +648,34 @@ init_port_start(void)
             struct rte_eth_rxconf rxq_conf;
             struct rte_eth_txconf txq_conf;
 
-            int ret = rte_eth_dev_info_get(port_id, &dev_info);
+            int ret;
+
+            /*
+             * A bonding port attaches its member ports -- and only then
+             * inherits their offload capabilities -- inside its own
+             * dev_configure() (bond_ethdev_configure() ->
+             * rte_eth_bond_member_add()). rte_eth_dev_configure() validates the
+             * requested offloads against dev_info *before* invoking that PMD
+             * callback, so a not-yet-configured bond reports an empty
+             * capability set (e.g. "TX VLAN insert offload is not supported").
+             * Configure the bond once with a null config first so the members
+             * attach, so the rte_eth_dev_info_get() below returns the real
+             * member-derived capabilities instead of an empty set. The regular
+             * rte_eth_dev_configure() further down then re-applies the chosen
+             * offloads against the now-correct capability set (its repeated
+             * member-add is a harmless no-op that only logs).
+             */
+            if (nb_slaves > 0 && port_id == u_port_id &&
+                rte_eal_process_type() == RTE_PROC_PRIMARY) {
+                struct rte_eth_conf null_conf = {0};
+                ret = rte_eth_dev_configure(port_id, nb_queues, nb_queues,
+                    &null_conf);
+                if (ret != 0) {
+                    return ret;
+                }
+            }
+
+            ret = rte_eth_dev_info_get(port_id, &dev_info);
             if (ret != 0)
                 rte_exit(EXIT_FAILURE,
                     "Error during getting device (port %u) info: %s\n",
@@ -726,14 +754,49 @@ init_port_start(void)
                 /* Enable HW CRC stripping */
                 port_conf.rxmode.offloads &= ~RTE_ETH_RX_OFFLOAD_KEEP_CRC;
 
-                /* FIXME: Enable TCP LRO ?*/
-                #if 0
-                if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_LRO) {
-                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is supported\n");
-                    port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_TCP_LRO;
-                    pconf->hw_features.rx_lro = 1;
+                /* Set TCP LRO (Large Receive Offload) */
+                if (ff_global_cfg.dpdk.lro) {
+                    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TCP_LRO) {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is supported\n");
+                        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TCP_LRO;
+
+                        /*
+                         * A coalesced LRO packet is much larger than the mbuf
+                         * data room, so it is delivered as a chain of mbufs.
+                         * Scatter RX must be enabled for the PMD to hand up
+                         * multi-segment packets (e.g. mlx5 rejects the rx queue
+                         * setup with ENOSPC otherwise).
+                         */
+                        if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_SCATTER) {
+                            port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_SCATTER;
+                        }
+
+                        /*
+                         * Cap the maximum coalesced packet size to what the
+                         * device reports. A bonding port does not report
+                         * max_lro_pkt_size, so fall back to the smallest value
+                         * reported by its physical members (processed earlier
+                         * in this loop); otherwise DPDK defaults it to the MTU
+                         * and the NIC coalesces nothing.
+                         */
+                        if (dev_info.max_lro_pkt_size) {
+                            if (lro_max_pkt_size == 0 ||
+                                dev_info.max_lro_pkt_size < lro_max_pkt_size) {
+                                lro_max_pkt_size = dev_info.max_lro_pkt_size;
+                            }
+                            port_conf.rxmode.max_lro_pkt_size =
+                                dev_info.max_lro_pkt_size;
+                        } else if (lro_max_pkt_size) {
+                            port_conf.rxmode.max_lro_pkt_size = lro_max_pkt_size;
+                        }
+
+                        pconf->hw_features.rx_lro = 1;
+                    } else {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is not supported\n");
+                    }
+                } else {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "LRO is disabled\n");
                 }
-                #endif
 
                 /* Set Rx checksum checking */
                 if ((dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) &&
@@ -777,6 +840,27 @@ init_port_start(void)
                     }
                 } else {
                     ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TSO is disabled\n");
+                }
+
+                /*
+                 * Enable hardware VLAN tag insertion on TX. This lets VLAN
+                 * sub-interfaces (if_vlan) offload tagging to the NIC, which
+                 * in turn allows them to inherit the checksum/TSO/LRO offloads
+                 * from this parent port (see ff_veth_setup_interface).
+                 * Gated by config: enabling it switches VLAN sub-interfaces
+                 * from software inline tagging to hardware tagging, so it is
+                 * opt-in to preserve the previous behavior by default.
+                 */
+                if (ff_global_cfg.dpdk.vlan_insert) {
+                    if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_VLAN_INSERT) {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is supported\n");
+                        port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+                        pconf->hw_features.tx_vlan_insert = 1;
+                    } else {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is not supported\n");
+                    }
+                } else {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "TX VLAN insert offload is disabled\n");
                 }
 
                 if (dev_info.reta_size) {
@@ -2166,22 +2250,40 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
 
     void *data = rte_pktmbuf_mtod(head, void*);
 
+    /*
+     * Compute the L2 header length. A VLAN sub-interface that tags in software
+     * (no hardware VLAN insertion) leaves an inline 802.1Q header in the
+     * packet, which pushes the IP header out; when tagging is offloaded to the
+     * NIC the tag is not in the packet and this stays RTE_ETHER_HDR_LEN.
+     */
+    uint16_t l2_len = RTE_ETHER_HDR_LEN;
+    {
+        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)data;
+        uint16_t etype = rte_be_to_cpu_16(eth->ether_type);
+        while (etype == RTE_ETHER_TYPE_VLAN || etype == RTE_ETHER_TYPE_QINQ) {
+            struct rte_vlan_hdr *vh =
+                (struct rte_vlan_hdr *)((char *)data + l2_len);
+            etype = rte_be_to_cpu_16(vh->eth_proto);
+            l2_len += sizeof(struct rte_vlan_hdr);
+        }
+    }
+
     if (offload.ip_csum) {
         /* ipv6 not supported yet */
         struct rte_ipv4_hdr *iph;
         int iph_len;
-        iph = (struct rte_ipv4_hdr *)(data + RTE_ETHER_HDR_LEN);
+        iph = (struct rte_ipv4_hdr *)(data + l2_len);
         iph_len = (iph->version_ihl & 0x0f) << 2;
 
         head->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4;
-        head->l2_len = RTE_ETHER_HDR_LEN;
+        head->l2_len = l2_len;
         head->l3_len = iph_len;
     }
 
     if (ctx->hw_features.tx_csum_l4) {
         struct rte_ipv4_hdr *iph;
         int iph_len;
-        iph = (struct rte_ipv4_hdr *)(data + RTE_ETHER_HDR_LEN);
+        iph = (struct rte_ipv4_hdr *)(data + l2_len);
         iph_len = (iph->version_ihl & 0x0f) << 2;
 
         if (iph->version == 4) {
@@ -2192,7 +2294,7 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
 
         if (offload.tcp_csum) {
             head->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
-            head->l2_len = RTE_ETHER_HDR_LEN;
+            head->l2_len = l2_len;
             head->l3_len = iph_len;
         }
 
@@ -2219,15 +2321,37 @@ ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m,
             tcph->cksum = rte_ipv4_phdr_cksum(iph, RTE_MBUF_F_TX_TCP_SEG);
 
             head->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
+            /*
+             * A VLAN sub-interface without hardware tagging carries only
+             * CSUM_TSO (VLAN checksum offload requires hardware tagging), so
+             * the ip_csum/tcp_csum branches above may not have run. Set
+             * l2_len/l3_len and, for IPv4, request the IP checksum here so TSO
+             * always gets a complete header description.
+             */
+            if (iph->version == 4) {
+                head->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
+            }
+            head->l2_len = l2_len;
+            head->l3_len = iph_len;
             head->l4_len = tcph_len;
             head->tso_segsz = offload.tso_seg_size;
         }
 
         if (offload.udp_csum) {
             head->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
-            head->l2_len = RTE_ETHER_HDR_LEN;
+            head->l2_len = l2_len;
             head->l3_len = iph_len;
         }
+    }
+
+    /*
+     * Hardware VLAN tag insertion. The FreeBSD if_vlan layer offloads tagging
+     * (M_VLANTAG) to the parent, leaving the L2/L3 headers contiguous, so the
+     * checksum/TSO offsets above stay correct. The NIC inserts the 802.1Q tag.
+     */
+    if (offload.vlan_tag) {
+        head->vlan_tci = offload.vlan_tci;
+        head->ol_flags |= RTE_MBUF_F_TX_VLAN;
     }
 
     ff_mbuf_free(m);

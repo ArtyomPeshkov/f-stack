@@ -290,6 +290,11 @@ ff_mbuf_tx_offload(void *m, struct ff_tx_offload *offload)
     if (mb->m_pkthdr.csum_flags & CSUM_TSO) {
         offload->tso_seg_size = mb->m_pkthdr.tso_segsz;
     }
+
+    if (mb->m_flags & M_VLANTAG) {
+        offload->vlan_tag = 1;
+        offload->vlan_tci = mb->m_pkthdr.ether_vtag;
+    }
 }
 
 void
@@ -843,6 +848,9 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     if (cfg->hw_features.rx_csum) {
         ifp->if_capabilities |= IFCAP_RXCSUM;
     }
+    if (cfg->hw_features.rx_lro) {
+        ifp->if_capabilities |= IFCAP_LRO;
+    }
     if (cfg->hw_features.tx_csum_ip) {
         ifp->if_capabilities |= IFCAP_TXCSUM;
         ifp->if_hwassist |= CSUM_IP;
@@ -853,6 +861,42 @@ ff_veth_setup_interface(struct ff_veth_softc *sc, struct ff_port_cfg *cfg)
     if (cfg->hw_features.tx_tso) {
         ifp->if_capabilities |= IFCAP_TSO;
         ifp->if_hwassist |= CSUM_TSO;
+    }
+
+    /*
+     * LRO inheritance to a VLAN sub-interface keys off IFCAP_VLAN_HWCSUM (see
+     * vlan_capabilities()). LRO is RX-side coalescing done by the NIC, so it
+     * does not depend on hardware VLAN tag insertion; advertise it whenever the
+     * parent can do checksum offload. The VLAN only actually ends up with
+     * IFCAP_LRO if the parent itself has it (i.e. lro=1). FreeBSD only *enables*
+     * hardware VLAN checksum when IFCAP_VLAN_HWTAGGING is also set, so without
+     * vlan_insert this grants LRO only and leaves VLAN checksums in software.
+     */
+    if (cfg->hw_features.rx_csum || cfg->hw_features.tx_csum_ip ||
+        cfg->hw_features.tx_csum_l4) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWCSUM;
+    }
+
+    /*
+     * TSO inheritance to a VLAN keys off IFCAP_VLAN_HWTSO and, per
+     * vlan_capabilities(), "does not necessarily require hardware VLAN
+     * tagging". The TX offload path (ff_dpdk_if_send / ff_offload_set) parses
+     * an inline 802.1Q header when computing l2_len, so TSO works whether the
+     * VLAN tags in software (inline) or offloads tagging to the NIC. Advertise
+     * it whenever the parent has TSO, independent of vlan_insert.
+     */
+    if (cfg->hw_features.tx_tso) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWTSO;
+    }
+
+    /*
+     * Hardware VLAN tag insertion. With it, if_vlan offloads tagging
+     * (M_VLANTAG) instead of prepending an inline 802.1Q header. This is what
+     * additionally lets a VLAN inherit hardware checksum offload (see
+     * vlan_capabilities(), which requires IFCAP_VLAN_HWTAGGING for csum).
+     */
+    if (cfg->hw_features.tx_vlan_insert) {
+        ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING | IFCAP_VLAN_MTU;
     }
 
     ifp->if_capenable = ifp->if_capabilities;

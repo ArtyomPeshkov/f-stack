@@ -974,10 +974,14 @@ ini_parse_handler(void* user, const char* section, const char* name,
         pconfig->dpdk.numa_on = atoi(value);
     } else if (MATCH("dpdk", "tso")) {
         pconfig->dpdk.tso = atoi(value);
+    } else if (MATCH("dpdk", "lro")) {
+        pconfig->dpdk.lro = atoi(value);
     } else if (MATCH("dpdk", "tx_csum_offoad_skip")) {
         pconfig->dpdk.tx_csum_offoad_skip = atoi(value);
     } else if (MATCH("dpdk", "vlan_strip")) {
         pconfig->dpdk.vlan_strip = atoi(value);
+    } else if (MATCH("dpdk", "vlan_insert")) {
+        pconfig->dpdk.vlan_insert = atoi(value);
     } else if (MATCH("dpdk", "vlan_filter")) {
         return parse_vlan_filter_list(pconfig, value);
     } else if (MATCH("dpdk", "idle_sleep")) {

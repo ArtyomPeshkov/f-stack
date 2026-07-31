@@ -50,6 +50,8 @@ struct ff_tx_offload {
     uint8_t udp_csum;
     uint8_t sctp_csum;
     uint16_t tso_seg_size;
+    uint8_t vlan_tag;
+    uint16_t vlan_tci;
 };
 
 struct ff_dpdk_if_context *ff_dpdk_register_if(void *sc, void *ifp,
