@@ -615,6 +615,7 @@ init_port_start(void)
         struct ff_port_cfg *pconf = NULL;
         uint16_t nb_queues;
         int nb_slaves;
+        uint32_t lro_max_pkt_size = 0;
 
         if (i < nb_ports) {
             u_port_id = ff_global_cfg.dpdk.portid_list[i];
@@ -745,13 +746,21 @@ init_port_start(void)
 
                         /*
                          * Cap the maximum coalesced packet size to what the
-                         * device reports. When the device does not report a
-                         * value, leave it 0 and let DPDK derive the default
-                         * from the MTU.
+                         * device reports. A bonding port does not report
+                         * max_lro_pkt_size, so fall back to the smallest value
+                         * reported by its physical members (processed earlier
+                         * in this loop); otherwise DPDK defaults it to the MTU
+                         * and the NIC coalesces nothing.
                          */
                         if (dev_info.max_lro_pkt_size) {
+                            if (lro_max_pkt_size == 0 ||
+                                dev_info.max_lro_pkt_size < lro_max_pkt_size) {
+                                lro_max_pkt_size = dev_info.max_lro_pkt_size;
+                            }
                             port_conf.rxmode.max_lro_pkt_size =
                                 dev_info.max_lro_pkt_size;
+                        } else if (lro_max_pkt_size) {
+                            port_conf.rxmode.max_lro_pkt_size = lro_max_pkt_size;
                         }
 
                         pconf->hw_features.rx_lro = 1;
