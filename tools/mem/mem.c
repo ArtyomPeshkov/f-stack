@@ -56,6 +56,11 @@ mem_status(struct ff_mem_args *mem)
 
 #define TO_MB(bytes) ((double)(bytes) / (1024 * 1024))
 
+#define SEP "|-------|------|------------|----------|----------|----------|" \
+    "----------|----------|-----------|-----------|\n"
+#define ROW_FMT "|%7d|%6d|%12.2f|%10.2f|%10.2f|%10.2f|%10.2f|%10.2f" \
+    "|%11u|%11u|\n"
+
 int
 main(int argc, char **argv)
 {
@@ -96,13 +101,11 @@ main(int argc, char **argv)
     }
 
     if (!single) {
-        printf("|---------|--------|--------------|--------------|"
-            "--------------|--------------|------------|------------|\n");
-        printf("|%9s|%8s|%14s|%14s|%14s|%14s|%12s|%12s|\n",
-            "proc_id", "socket", "hugepage(MB)", "heap(MB)",
-            "heap used(MB)", "heap free(MB)", "mbuf total", "mbuf inuse");
-        printf("|---------|--------|--------------|--------------|"
-            "--------------|--------------|------------|------------|\n");
+        printf(SEP);
+        printf("|%7s|%6s|%12s|%10s|%10s|%10s|%10s|%10s|%11s|%11s|\n",
+            "proc_id", "socket", "hugepage(MB)", "heap(MB)", "used(MB)",
+            "free(MB)", "kheap(MB)", "rss(MB)", "mbuf total", "mbuf inuse");
+        printf(SEP);
     }
 
     for (i = proc_id; i <= max_proc_id; i++) {
@@ -116,23 +119,25 @@ main(int argc, char **argv)
         }
 
         if (single) {
-            printf("%d,%d,%lu,%lu,%lu,%lu,%u,%u\n",
+            printf("%d,%d,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n",
                 i, mem.socket_id, mem.hugepage_bytes,
                 mem.heap_total_bytes, mem.heap_alloc_bytes,
-                mem.heap_free_bytes, mem.mbuf_total, mem.mbuf_inuse);
+                mem.heap_free_bytes, mem.kheap_bytes, mem.rss_bytes,
+                mem.mbuf_total, mem.mbuf_inuse);
         } else {
-            printf("|%9d|%8d|%14.2f|%14.2f|%14.2f|%14.2f|%12u|%12u|\n",
+            printf(ROW_FMT,
                 i, mem.socket_id, TO_MB(mem.hugepage_bytes),
                 TO_MB(mem.heap_total_bytes), TO_MB(mem.heap_alloc_bytes),
-                TO_MB(mem.heap_free_bytes), mem.mbuf_total, mem.mbuf_inuse);
+                TO_MB(mem.heap_free_bytes), TO_MB(mem.kheap_bytes),
+                TO_MB(mem.rss_bytes), mem.mbuf_total, mem.mbuf_inuse);
         }
     }
 
     if (!single) {
-        printf("|---------|--------|--------------|--------------|"
-            "--------------|--------------|------------|------------|\n");
+        printf(SEP);
         printf("hugepage/heap/mbuf memory is shared by all f-stack "
             "processes of the same socket, do not sum it up.\n");
+        printf("kheap and rss are per process and hold no hugepages.\n");
     }
 
     ff_ipc_exit();

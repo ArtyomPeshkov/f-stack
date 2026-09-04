@@ -302,23 +302,31 @@ Columns:
   (`rte_malloc_get_socket_stats()`), everything allocated by memzones, mempools and `rte_malloc`.
 - `mbuf total`, `mbuf inuse`: the mbuf pool of the socket, useful to catch mbuf leaks.
 
-All of these are shared by the F-Stack processes running on the same socket,
-so the values must not be summed up.
+The columns above are shared by the F-Stack processes running on the same socket,
+so their values must not be summed up. The two below are per process and hold no
+hugepage memory at all:
+
+- `kheap(MB)`: the libc heap in use (`mallinfo2()`), where `malloc(9)` of the
+  FreeBSD stack ends up, see `ff_malloc()`.
+- `rss(MB)`: resident memory of the process except hugepages, which the kernel
+  accounts apart. Besides the libc heap it covers the UMA zones, mmap'ed by
+  `kmem_malloc()` and therefore invisible to `kheap`.
 
 Examples:
 ```
 ./sbin/mem -p 0 -P 1
 
-|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
-|  proc_id|  socket|  hugepage(MB)|      heap(MB)| heap used(MB)| heap free(MB)|  mbuf total|  mbuf inuse|
-|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
-|        0|       0|       1024.00|       1024.00|        678.14|        345.86|      262143|        4096|
-|        1|       0|       1024.00|       1024.00|        678.14|        345.86|      262143|        4096|
-|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
+|-------|------|------------|----------|----------|----------|----------|----------|-----------|-----------|
+|proc_id|socket|hugepage(MB)|  heap(MB)|  used(MB)|  free(MB)| kheap(MB)|   rss(MB)| mbuf total| mbuf inuse|
+|-------|------|------------|----------|----------|----------|----------|----------|-----------|-----------|
+|      0|     0|     1024.00|   1024.00|    678.14|    345.86|    112.30|    286.55|     262143|       4096|
+|      1|     0|     1024.00|   1024.00|    678.14|    345.86|    109.82|    281.17|     262143|       4096|
+|-------|------|------------|----------|----------|----------|----------|----------|-----------|-----------|
 hugepage/heap/mbuf memory is shared by all f-stack processes of the same socket, do not sum it up.
+kheap and rss are per process and hold no hugepages.
 
 ./sbin/mem -s
-0,0,1073741824,1073741824,711075328,362666496,262143,4096
+0,0,1073741824,1073741824,711075328,362666496,117754880,300472320,262143,4096
 ```
 
 # how to implement a custom tool for communicating with F-Stack process

@@ -144,6 +144,16 @@ struct ff_mem_args {
     /* mbuf pool of socket_id, in mbufs, also shared. */
     uint32_t mbuf_total;
     uint32_t mbuf_inuse;
+    /*
+     * The two below are per process and have nothing to do with
+     * hugepages, the FreeBSD stack does not allocate from them:
+     * kheap_bytes is the libc heap used by malloc(9) (ff_malloc()),
+     * rss_bytes is all the resident memory of the process except
+     * hugepages, so it also covers the UMA zones, which are mmap'ed
+     * by kmem_malloc() and thus invisible to the libc heap.
+     */
+    uint64_t kheap_bytes;
+    uint64_t rss_bytes;
 };
 
 
