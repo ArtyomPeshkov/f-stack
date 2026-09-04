@@ -45,6 +45,7 @@ enum FF_MSG_TYPE {
     FF_IPFW_CTL,
     FF_TRAFFIC,
     FF_KNICTL,
+    FF_MEM,
 
     /*
      * to add other msg type before FF_MSG_NUM
@@ -127,6 +128,38 @@ struct ff_knictl_args {
     int kni_action;
 };
 
+struct ff_mem_args {
+    /* NUMA socket this F-Stack process runs on. */
+    int socket_id;
+    /*
+     * Hugepage memory currently mapped by DPDK EAL, in bytes.
+     * Shared by all F-Stack processes, so it is the same value
+     * whichever process is asked.
+     */
+    uint64_t huge_mapped_bytes;
+    /*
+     * DPDK malloc heap of socket_id, in bytes, also shared.
+     * The heap lives in the mapped hugepages above, and
+     * dpdk_heap_used + dpdk_heap_free == dpdk_heap_total.
+     */
+    uint64_t dpdk_heap_total_bytes;
+    uint64_t dpdk_heap_used_bytes;
+    uint64_t dpdk_heap_free_bytes;
+    /* mbuf pool of socket_id, in mbufs, also shared. */
+    uint32_t mbuf_total;
+    uint32_t mbuf_inuse;
+    /*
+     * The two below are per process and hold no hugepage memory:
+     * bsd_malloc_bytes is the libc heap in use, where malloc(9) of
+     * the FreeBSD stack ends up (ff_malloc()), and rss_nohuge_bytes
+     * is all the resident memory of the process except hugepages,
+     * so it also covers the UMA zones, which are mmap'ed by
+     * kmem_malloc() and thus invisible to the libc heap.
+     */
+    uint64_t bsd_malloc_bytes;
+    uint64_t rss_nohuge_bytes;
+};
+
 
 #define MAX_MSG_BUF_SIZE 10240
 
@@ -151,6 +184,7 @@ struct ff_msg {
         struct ff_ipfw_args ipfw;
         struct ff_traffic_args traffic;
         struct ff_knictl_args knictl;
+        struct ff_mem_args mem;
     };
 } __attribute__((packed)) __rte_cache_aligned;
 

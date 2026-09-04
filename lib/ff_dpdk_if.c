@@ -25,6 +25,7 @@
  */
 #include <assert.h>
 #include <unistd.h>
+#include <malloc.h>
 #include <sys/mman.h>
 #include <errno.h>
 
@@ -1922,6 +1923,77 @@ void ff_get_traffic(void *buffer)
     *(struct ff_traffic_args *)buffer = ff_traffic;
 }
 
+/*
+ * The libc heap in use, malloc(9) of the FreeBSD stack ends up here,
+ * see ff_malloc(). The UMA zones are not part of it, they are mmap'ed
+ * by kmem_malloc().
+ */
+static inline uint64_t
+get_bsd_malloc_bytes(void)
+{
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+    struct mallinfo2 mi = mallinfo2();
+#else
+    /* the fields are int here, they wrap above 2GB */
+    struct mallinfo mi = mallinfo();
+#endif
+
+    /* allocated bytes of the heap plus the large mmap'ed allocations */
+    return (uint64_t)mi.uordblks + (uint64_t)mi.hblkhd;
+}
+
+/*
+ * Resident memory of this process, hugepages excluded, the kernel
+ * accounts them apart. It covers the libc heap, the UMA zones and
+ * everything else the process has touched.
+ */
+static inline uint64_t
+get_rss_nohuge_bytes(void)
+{
+    unsigned long vsz, rss;
+    FILE *f = fopen("/proc/self/statm", "r");
+
+    if (f == NULL) {
+        return 0;
+    }
+
+    if (fscanf(f, "%lu %lu", &vsz, &rss) != 2) {
+        rss = 0;
+    }
+    fclose(f);
+
+    return (uint64_t)rss * sysconf(_SC_PAGESIZE);
+}
+
+static inline void
+handle_mem_msg(struct ff_msg *msg)
+{
+    struct rte_malloc_socket_stats stats;
+    int socket_id = lcore_conf.socket_id;
+    struct rte_mempool *mp = pktmbuf_pool[socket_id];
+
+    memset(&msg->mem, 0, sizeof(msg->mem));
+    msg->mem.socket_id = socket_id;
+    /* Hugepage memory currently mapped by EAL, external heaps excluded. */
+    msg->mem.huge_mapped_bytes = rte_eal_get_physmem_size();
+
+    if (rte_malloc_get_socket_stats(socket_id, &stats) == 0) {
+        msg->mem.dpdk_heap_total_bytes = stats.heap_totalsz_bytes;
+        msg->mem.dpdk_heap_used_bytes = stats.heap_allocsz_bytes;
+        msg->mem.dpdk_heap_free_bytes = stats.heap_freesz_bytes;
+    }
+
+    if (mp != NULL) {
+        msg->mem.mbuf_total = mp->size;
+        msg->mem.mbuf_inuse = rte_mempool_in_use_count(mp);
+    }
+
+    msg->mem.bsd_malloc_bytes = get_bsd_malloc_bytes();
+    msg->mem.rss_nohuge_bytes = get_rss_nohuge_bytes();
+
+    msg->result = 0;
+}
+
 #ifdef FF_KNI
 static inline void
 handle_knictl_msg(struct ff_msg *msg)
@@ -1992,6 +2064,9 @@ handle_msg(struct ff_msg *msg, uint16_t proc_id)
 #endif
         case FF_TRAFFIC:
             handle_traffic_msg(msg);
+            break;
+        case FF_MEM:
+            handle_mem_msg(msg);
             break;
 #ifdef FF_KNI
         case FF_KNICTL:

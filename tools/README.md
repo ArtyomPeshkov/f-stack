@@ -289,6 +289,52 @@ ndp -C <f-stack proc_id> [-nt] -s nodename etheraddr [temp] [proxy]
 ```
 For more details, see [Manual page](https://www.freebsd.org/cgi/man.cgi?ndp).
 
+# mem
+Show the hugepage memory that DPDK really uses right now.
+Usage:
+```
+mem [-p <f-stack proc_id>] [-P <max proc_id>] [-s]
+```
+Columns, all sizes in MB:
+- `huge mapped`: hugepage memory currently mapped by DPDK EAL
+  (`rte_eal_get_physmem_size()`), it is not the value of `memory` in
+  `config.ini`, which is only preallocated at startup.
+- `dpdk heap`, `dpdk used`, `dpdk free`: the DPDK malloc heap of the socket
+  (`rte_malloc_get_socket_stats()`), which lives in the mapped hugepages
+  above. `used` is everything taken by memzones, mempools and `rte_malloc()`.
+- `mbuf total`, `mbuf inuse`: the mbuf pool of the socket, in mbufs, useful
+  to catch mbuf leaks.
+
+The columns above are shared by the F-Stack processes running on the same
+socket, so their values must not be summed up. The two below are per process
+and hold no hugepage memory at all:
+
+- `bsd malloc`: the libc heap in use (`mallinfo2()`), where `malloc(9)` of the
+  FreeBSD stack ends up, see `ff_malloc()`.
+- `rss w/o huge`: resident memory of the process except hugepages, which the
+  kernel accounts apart. Besides the libc heap it covers the UMA zones,
+  mmap'ed by `kmem_malloc()` and therefore invisible to `bsd malloc`.
+
+Examples:
+```
+./sbin/mem -p 0 -P 1
+
+all sizes are MB, mbuf counters are mbufs
+|-------|------|------------|----------|----------|----------|-----------|------------|-----------|-----------|
+|proc_id|socket| huge mapped| dpdk heap| dpdk used| dpdk free| bsd malloc|rss w/o huge| mbuf total| mbuf inuse|
+|-------|------|------------|----------|----------|----------|-----------|------------|-----------|-----------|
+|      0|     0|     1024.00|   1024.00|    678.14|    345.86|     112.30|      286.55|     262143|       4096|
+|      1|     0|     1024.00|   1024.00|    678.14|    345.86|     109.82|      281.17|     262143|       4096|
+|-------|------|------------|----------|----------|----------|-----------|------------|-----------|-----------|
+huge/dpdk/mbuf columns are shared by all f-stack processes of the same socket, do not sum them up.
+bsd malloc and rss are per process and hold no hugepages.
+```
+The `-s` output is one csv line per process, in bytes, same order as the table:
+```
+./sbin/mem -s
+0,0,1073741824,1073741824,711075328,362666496,117754880,300472320,262143,4096
+```
+
 # how to implement a custom tool for communicating with F-Stack process
 
 Add a new FF_MSG_TYPE in ff_msg.h:
