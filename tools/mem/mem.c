@@ -57,8 +57,9 @@ mem_status(struct ff_mem_args *mem)
 #define TO_MB(bytes) ((double)(bytes) / (1024 * 1024))
 
 #define SEP "|-------|------|------------|----------|----------|----------|" \
-    "----------|----------|-----------|-----------|\n"
-#define ROW_FMT "|%7d|%6d|%12.2f|%10.2f|%10.2f|%10.2f|%10.2f|%10.2f" \
+    "-----------|------------|-----------|-----------|\n"
+#define HDR_FMT "|%7s|%6s|%12s|%10s|%10s|%10s|%11s|%12s|%11s|%11s|\n"
+#define ROW_FMT "|%7d|%6d|%12.2f|%10.2f|%10.2f|%10.2f|%11.2f|%12.2f" \
     "|%11u|%11u|\n"
 
 int
@@ -101,10 +102,12 @@ main(int argc, char **argv)
     }
 
     if (!single) {
+        printf("all sizes are MB, mbuf counters are mbufs\n");
         printf(SEP);
-        printf("|%7s|%6s|%12s|%10s|%10s|%10s|%10s|%10s|%11s|%11s|\n",
-            "proc_id", "socket", "hugepage(MB)", "heap(MB)", "used(MB)",
-            "free(MB)", "kheap(MB)", "rss(MB)", "mbuf total", "mbuf inuse");
+        printf(HDR_FMT,
+            "proc_id", "socket", "huge mapped", "dpdk heap", "dpdk used",
+            "dpdk free", "bsd malloc", "rss w/o huge", "mbuf total",
+            "mbuf inuse");
         printf(SEP);
     }
 
@@ -120,24 +123,27 @@ main(int argc, char **argv)
 
         if (single) {
             printf("%d,%d,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n",
-                i, mem.socket_id, mem.hugepage_bytes,
-                mem.heap_total_bytes, mem.heap_alloc_bytes,
-                mem.heap_free_bytes, mem.kheap_bytes, mem.rss_bytes,
-                mem.mbuf_total, mem.mbuf_inuse);
+                i, mem.socket_id, mem.huge_mapped_bytes,
+                mem.dpdk_heap_total_bytes, mem.dpdk_heap_used_bytes,
+                mem.dpdk_heap_free_bytes, mem.bsd_malloc_bytes,
+                mem.rss_nohuge_bytes, mem.mbuf_total, mem.mbuf_inuse);
         } else {
             printf(ROW_FMT,
-                i, mem.socket_id, TO_MB(mem.hugepage_bytes),
-                TO_MB(mem.heap_total_bytes), TO_MB(mem.heap_alloc_bytes),
-                TO_MB(mem.heap_free_bytes), TO_MB(mem.kheap_bytes),
-                TO_MB(mem.rss_bytes), mem.mbuf_total, mem.mbuf_inuse);
+                i, mem.socket_id, TO_MB(mem.huge_mapped_bytes),
+                TO_MB(mem.dpdk_heap_total_bytes),
+                TO_MB(mem.dpdk_heap_used_bytes),
+                TO_MB(mem.dpdk_heap_free_bytes),
+                TO_MB(mem.bsd_malloc_bytes), TO_MB(mem.rss_nohuge_bytes),
+                mem.mbuf_total, mem.mbuf_inuse);
         }
     }
 
     if (!single) {
         printf(SEP);
-        printf("hugepage/heap/mbuf memory is shared by all f-stack "
-            "processes of the same socket, do not sum it up.\n");
-        printf("kheap and rss are per process and hold no hugepages.\n");
+        printf("huge/dpdk/mbuf columns are shared by all f-stack "
+            "processes of the same socket, do not sum them up.\n");
+        printf("bsd malloc and rss are per process and hold no "
+            "hugepages.\n");
     }
 
     ff_ipc_exit();

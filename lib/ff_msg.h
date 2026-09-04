@@ -136,24 +136,28 @@ struct ff_mem_args {
      * Shared by all F-Stack processes, so it is the same value
      * whichever process is asked.
      */
-    uint64_t hugepage_bytes;
-    /* DPDK malloc heap of socket_id, in bytes, also shared. */
-    uint64_t heap_total_bytes;
-    uint64_t heap_alloc_bytes;
-    uint64_t heap_free_bytes;
+    uint64_t huge_mapped_bytes;
+    /*
+     * DPDK malloc heap of socket_id, in bytes, also shared.
+     * The heap lives in the mapped hugepages above, and
+     * dpdk_heap_used + dpdk_heap_free == dpdk_heap_total.
+     */
+    uint64_t dpdk_heap_total_bytes;
+    uint64_t dpdk_heap_used_bytes;
+    uint64_t dpdk_heap_free_bytes;
     /* mbuf pool of socket_id, in mbufs, also shared. */
     uint32_t mbuf_total;
     uint32_t mbuf_inuse;
     /*
-     * The two below are per process and have nothing to do with
-     * hugepages, the FreeBSD stack does not allocate from them:
-     * kheap_bytes is the libc heap used by malloc(9) (ff_malloc()),
-     * rss_bytes is all the resident memory of the process except
-     * hugepages, so it also covers the UMA zones, which are mmap'ed
-     * by kmem_malloc() and thus invisible to the libc heap.
+     * The two below are per process and hold no hugepage memory:
+     * bsd_malloc_bytes is the libc heap in use, where malloc(9) of
+     * the FreeBSD stack ends up (ff_malloc()), and rss_nohuge_bytes
+     * is all the resident memory of the process except hugepages,
+     * so it also covers the UMA zones, which are mmap'ed by
+     * kmem_malloc() and thus invisible to the libc heap.
      */
-    uint64_t kheap_bytes;
-    uint64_t rss_bytes;
+    uint64_t bsd_malloc_bytes;
+    uint64_t rss_nohuge_bytes;
 };
 
 

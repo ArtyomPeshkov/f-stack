@@ -1929,7 +1929,7 @@ void ff_get_traffic(void *buffer)
  * by kmem_malloc().
  */
 static inline uint64_t
-get_kheap_bytes(void)
+get_bsd_malloc_bytes(void)
 {
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
     struct mallinfo2 mi = mallinfo2();
@@ -1948,7 +1948,7 @@ get_kheap_bytes(void)
  * everything else the process has touched.
  */
 static inline uint64_t
-get_rss_bytes(void)
+get_rss_nohuge_bytes(void)
 {
     unsigned long vsz, rss;
     FILE *f = fopen("/proc/self/statm", "r");
@@ -1975,12 +1975,12 @@ handle_mem_msg(struct ff_msg *msg)
     memset(&msg->mem, 0, sizeof(msg->mem));
     msg->mem.socket_id = socket_id;
     /* Hugepage memory currently mapped by EAL, external heaps excluded. */
-    msg->mem.hugepage_bytes = rte_eal_get_physmem_size();
+    msg->mem.huge_mapped_bytes = rte_eal_get_physmem_size();
 
     if (rte_malloc_get_socket_stats(socket_id, &stats) == 0) {
-        msg->mem.heap_total_bytes = stats.heap_totalsz_bytes;
-        msg->mem.heap_alloc_bytes = stats.heap_allocsz_bytes;
-        msg->mem.heap_free_bytes = stats.heap_freesz_bytes;
+        msg->mem.dpdk_heap_total_bytes = stats.heap_totalsz_bytes;
+        msg->mem.dpdk_heap_used_bytes = stats.heap_allocsz_bytes;
+        msg->mem.dpdk_heap_free_bytes = stats.heap_freesz_bytes;
     }
 
     if (mp != NULL) {
@@ -1988,8 +1988,8 @@ handle_mem_msg(struct ff_msg *msg)
         msg->mem.mbuf_inuse = rte_mempool_in_use_count(mp);
     }
 
-    msg->mem.kheap_bytes = get_kheap_bytes();
-    msg->mem.rss_bytes = get_rss_bytes();
+    msg->mem.bsd_malloc_bytes = get_bsd_malloc_bytes();
+    msg->mem.rss_nohuge_bytes = get_rss_nohuge_bytes();
 
     msg->result = 0;
 }
