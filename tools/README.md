@@ -289,6 +289,38 @@ ndp -C <f-stack proc_id> [-nt] -s nodename etheraddr [temp] [proxy]
 ```
 For more details, see [Manual page](https://www.freebsd.org/cgi/man.cgi?ndp).
 
+# mem
+Show the hugepage memory that DPDK really uses right now.
+Usage:
+```
+mem [-p <f-stack proc_id>] [-P <max proc_id>] [-s]
+```
+Columns:
+- `hugepage(MB)`: hugepage memory currently mapped by DPDK EAL (`rte_eal_get_physmem_size()`),
+  it is not the value of `memory` in `config.ini`, which is only preallocated at startup.
+- `heap(MB)`, `heap used(MB)`, `heap free(MB)`: DPDK malloc heap of the socket
+  (`rte_malloc_get_socket_stats()`), everything allocated by memzones, mempools and `rte_malloc`.
+- `mbuf total`, `mbuf inuse`: the mbuf pool of the socket, useful to catch mbuf leaks.
+
+All of these are shared by the F-Stack processes running on the same socket,
+so the values must not be summed up.
+
+Examples:
+```
+./sbin/mem -p 0 -P 1
+
+|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
+|  proc_id|  socket|  hugepage(MB)|      heap(MB)| heap used(MB)| heap free(MB)|  mbuf total|  mbuf inuse|
+|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
+|        0|       0|       1024.00|       1024.00|        678.14|        345.86|      262143|        4096|
+|        1|       0|       1024.00|       1024.00|        678.14|        345.86|      262143|        4096|
+|---------|--------|--------------|--------------|--------------|--------------|------------|------------|
+hugepage/heap/mbuf memory is shared by all f-stack processes of the same socket, do not sum it up.
+
+./sbin/mem -s
+0,0,1073741824,1073741824,711075328,362666496,262143,4096
+```
+
 # how to implement a custom tool for communicating with F-Stack process
 
 Add a new FF_MSG_TYPE in ff_msg.h:

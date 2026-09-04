@@ -45,6 +45,7 @@ enum FF_MSG_TYPE {
     FF_IPFW_CTL,
     FF_TRAFFIC,
     FF_KNICTL,
+    FF_MEM,
 
     /*
      * to add other msg type before FF_MSG_NUM
@@ -127,6 +128,24 @@ struct ff_knictl_args {
     int kni_action;
 };
 
+struct ff_mem_args {
+    /* NUMA socket this F-Stack process runs on. */
+    int socket_id;
+    /*
+     * Hugepage memory currently mapped by DPDK EAL, in bytes.
+     * Shared by all F-Stack processes, so it is the same value
+     * whichever process is asked.
+     */
+    uint64_t hugepage_bytes;
+    /* DPDK malloc heap of socket_id, in bytes, also shared. */
+    uint64_t heap_total_bytes;
+    uint64_t heap_alloc_bytes;
+    uint64_t heap_free_bytes;
+    /* mbuf pool of socket_id, in mbufs, also shared. */
+    uint32_t mbuf_total;
+    uint32_t mbuf_inuse;
+};
+
 
 #define MAX_MSG_BUF_SIZE 10240
 
@@ -151,6 +170,7 @@ struct ff_msg {
         struct ff_ipfw_args ipfw;
         struct ff_traffic_args traffic;
         struct ff_knictl_args knictl;
+        struct ff_mem_args mem;
     };
 } __attribute__((packed)) __rte_cache_aligned;
 

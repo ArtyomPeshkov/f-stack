@@ -1922,6 +1922,32 @@ void ff_get_traffic(void *buffer)
     *(struct ff_traffic_args *)buffer = ff_traffic;
 }
 
+static inline void
+handle_mem_msg(struct ff_msg *msg)
+{
+    struct rte_malloc_socket_stats stats;
+    int socket_id = lcore_conf.socket_id;
+    struct rte_mempool *mp = pktmbuf_pool[socket_id];
+
+    memset(&msg->mem, 0, sizeof(msg->mem));
+    msg->mem.socket_id = socket_id;
+    /* Hugepage memory currently mapped by EAL, external heaps excluded. */
+    msg->mem.hugepage_bytes = rte_eal_get_physmem_size();
+
+    if (rte_malloc_get_socket_stats(socket_id, &stats) == 0) {
+        msg->mem.heap_total_bytes = stats.heap_totalsz_bytes;
+        msg->mem.heap_alloc_bytes = stats.heap_allocsz_bytes;
+        msg->mem.heap_free_bytes = stats.heap_freesz_bytes;
+    }
+
+    if (mp != NULL) {
+        msg->mem.mbuf_total = mp->size;
+        msg->mem.mbuf_inuse = rte_mempool_in_use_count(mp);
+    }
+
+    msg->result = 0;
+}
+
 #ifdef FF_KNI
 static inline void
 handle_knictl_msg(struct ff_msg *msg)
@@ -1992,6 +2018,9 @@ handle_msg(struct ff_msg *msg, uint16_t proc_id)
 #endif
         case FF_TRAFFIC:
             handle_traffic_msg(msg);
+            break;
+        case FF_MEM:
+            handle_mem_msg(msg);
             break;
 #ifdef FF_KNI
         case FF_KNICTL:
