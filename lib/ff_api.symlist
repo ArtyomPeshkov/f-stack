@@ -78,3 +78,6 @@ ff_log_set_level
 ff_log
 ff_vlog
 ff_log_close
+ff_arpping_request
+ff_arpping_lookup
+ff_arpping_announce

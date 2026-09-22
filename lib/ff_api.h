@@ -337,6 +337,47 @@ enum FF_NGCTL_CMD {
 
 int ff_ngctl(int cmd, void *data);
 
+/*
+ * ARP ping, used by the `arpping' tool and callable by the application,
+ * e.g. to announce a virtual address right after a failover.
+ *
+ * `ifname' may be NULL or empty, then the first running ethernet interface
+ * is used. `sip', `tip' and `ip' are IPv4 addresses in network byte order.
+ * They all return 0 on success and a negative errno on failure.
+ */
+
+/*
+ * Broadcast an ARP request for `tip'. A zero `sip' lets the stack pick an
+ * address of the outgoing interface, it then fails with -EADDRNOTAVAIL if
+ * the target is not on any of its subnets. A non zero `flush' drops the
+ * ARP entry of `tip' first, so that a following ff_arpping_lookup() tells
+ * a fresh reply from an entry that was cached already. Static entries and
+ * the addresses of the interface itself are never dropped.
+ */
+int ff_arpping_request(const char *ifname, uint32_t sip, uint32_t tip,
+    int flush);
+
+/* The entry holds a link layer address, `mac' has been filled in. */
+#define FF_ARPPING_LLE_VALID     0x0001
+/* The entry was added by hand and is never refreshed by a reply. */
+#define FF_ARPPING_LLE_STATIC    0x0002
+/* The address belongs to the interface itself, it never answers a request. */
+#define FF_ARPPING_LLE_LOCAL     0x0004
+
+/*
+ * Read the ARP entry of `tip'. `lle_flags' is set to a combination of the
+ * FF_ARPPING_LLE_* bits above, and `mac' is filled with the 6 bytes of the
+ * link layer address when FF_ARPPING_LLE_VALID is among them.
+ */
+int ff_arpping_lookup(const char *ifname, uint32_t tip, uint8_t *mac,
+    int *lle_flags);
+
+/*
+ * Send a gratuitous ARP announcing `ip', which makes the neighbours update
+ * their ARP caches and the switches their forwarding tables.
+ */
+int ff_arpping_announce(const char *ifname, uint32_t ip);
+
 /* internal api end */
 
 /* zero ccopy API begin */

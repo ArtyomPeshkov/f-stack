@@ -267,7 +267,8 @@ FF_SRCS+=                     \
 	ff_subr_prf.c         \
 	ff_vfs_ops.c          \
 	ff_veth.c             \
-	ff_route.c
+	ff_route.c            \
+	ff_arpping.c
 
 ifdef FF_NETGRAPH
 FF_SRCS+=                   \

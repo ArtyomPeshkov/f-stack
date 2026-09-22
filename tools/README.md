@@ -243,6 +243,78 @@ usage: arp -p <f-stack proc_id> [-n] [-i interface] hostname
 
 For more details, see [Manual page](https://www.freebsd.org/cgi/man.cgi?arp).
 
+# arpping
+Sends ARP requests through the stack of an F-Stack process and reports which
+hardware address answers, like `arping(8)` does on Linux. It is useful to check
+that a neighbour is alive at layer 2 even when it filters ICMP, to detect a
+duplicate address before an application takes over a virtual address, and to
+announce that address afterwards.
+
+Usage:
+```
+arpping -p <f-stack proc_id> [-bfqDKU] [-c count] [-i interval]
+                  [-w deadline] [-I interface] [-s source] destination
+```
+Options:
+```
+-c count      stop after <count> probes
+-i interval   seconds between two probes, default 1
+-w deadline   give up after <deadline> seconds
+-I interface  interface to use, default the first running one
+-s source     sender address of the request
+-D            duplicate address detection, exit 1 if the address is in use
+-U            send a gratuitous ARP announcing <destination> instead
+-K            keep the ARP entry instead of dropping it before each probe
+-f            exit on the first reply
+-q            quiet, print the summary only
+-b            accepted for compatibility, requests are always broadcast
+```
+Examples:
+```
+     Check that the gateway answers on layer 2:
+
+       ./sbin/arpping -p 0 -c 3 192.168.1.1
+       ARPPING 192.168.1.1 from the interface address on the first running interface
+       Reply from 192.168.1.1 [00:11:22:33:44:55]  0.512ms
+       Reply from 192.168.1.1 [00:11:22:33:44:55]  0.487ms
+       Reply from 192.168.1.1 [00:11:22:33:44:55]  0.501ms
+
+       --- 192.168.1.1 arpping statistics ---
+       3 probes transmitted, 3 responses received, 0% loss
+       rtt min/avg/max = 0.487/0.500/0.512 ms
+
+     Refuse to bring up a virtual address that somebody else already owns,
+     the exit status is 1 when the address answers:
+
+       ./sbin/arpping -p 0 -D -q 192.168.1.100
+
+     Announce a virtual address after a failover, so that the neighbours
+     update their ARP caches and the switches their forwarding tables:
+
+       ./sbin/arpping -p 0 -U -c 3 -i 0.2 192.168.1.100
+```
+Notes:
+- The request is sent by the stack of the process selected with `-p`, so the
+  answer is looked up in the ARP table of that process. ARP frames are
+  delivered to every F-Stack process, so the reply always reaches the one
+  that asked.
+- A reply is detected by polling the ARP table, therefore the reported round
+  trip time includes the ipc latency and has a resolution of about half a
+  millisecond. It tells a working neighbour from a silent one, it is not a
+  measurement of the wire latency.
+- By default the ARP entry of the target is dropped before each probe, so that
+  a warm cache cannot be mistaken for a reply. With `-K` the cache is left
+  alone and an entry that is already there is reported right away.
+- Entries added by hand with `arp -s` and the addresses of the interface
+  itself are never dropped, and a reply cannot be told from them, so arpping
+  reports them instead of pretending that an answer came back.
+- `-s` only changes the sender address of the request, it cannot be zero, so
+  `-D` sends an ordinary ARP request rather than the ARP probe of RFC 5227.
+  It answers the question the probe is usually asked before an address is
+  configured; for an address the interface already owns the stack swallows
+  the conflicting reply, so `-D` cannot report it.
+- `-A` is not implemented, use `-U` to send a gratuitous ARP.
+
 # traffic
 Usage:
 ```

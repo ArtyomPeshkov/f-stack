@@ -45,6 +45,7 @@ enum FF_MSG_TYPE {
     FF_IPFW_CTL,
     FF_TRAFFIC,
     FF_KNICTL,
+    FF_ARPPING,
 
     /*
      * to add other msg type before FF_MSG_NUM
@@ -127,6 +128,40 @@ struct ff_knictl_args {
     int kni_action;
 };
 
+#define FF_ARPPING_IFNAMSIZ     16
+#define FF_ARPPING_MACLEN       6
+
+enum FF_ARPPING_CMD {
+    /* Broadcast an ARP request for target_ip. */
+    FF_ARPPING_CMD_PROBE,
+    /* Read the current state of the ARP entry of target_ip. */
+    FF_ARPPING_CMD_POLL,
+    /* Send a gratuitous ARP announcing target_ip. */
+    FF_ARPPING_CMD_ANNOUNCE,
+};
+
+/*
+ * Drop the existing ARP entry before sending the request, so that a
+ * following successful FF_ARPPING_CMD_POLL really means that a reply
+ * has just been received instead of that the cache was already warm.
+ */
+#define FF_ARPPING_FLAG_FLUSH   0x0001
+
+struct ff_arpping_args {
+    int cmd;
+    int flags;
+    /* Interface to use, empty means the first running ethernet one. */
+    char ifname[FF_ARPPING_IFNAMSIZ];
+    /* IPv4 addresses, network byte order. */
+    uint32_t target_ip;
+    /* 0 lets the stack pick an address of the outgoing interface. */
+    uint32_t source_ip;
+    /* Filled in by FF_ARPPING_CMD_POLL, see FF_ARPPING_LLE_* in ff_api.h. */
+    int lle_flags;
+    uint8_t mac[FF_ARPPING_MACLEN];
+    uint8_t pad[2];
+};
+
 
 #define MAX_MSG_BUF_SIZE 10240
 
@@ -151,6 +186,7 @@ struct ff_msg {
         struct ff_ipfw_args ipfw;
         struct ff_traffic_args traffic;
         struct ff_knictl_args knictl;
+        struct ff_arpping_args arpping;
     };
 } __attribute__((packed)) __rte_cache_aligned;
 

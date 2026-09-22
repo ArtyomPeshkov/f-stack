@@ -1956,6 +1956,34 @@ handle_knictl_msg(struct ff_msg *msg)
 #endif
 
 static inline void
+handle_arpping_msg(struct ff_msg *msg)
+{
+    struct ff_arpping_args *args = &msg->arpping;
+    int ret;
+
+    args->ifname[FF_ARPPING_IFNAMSIZ - 1] = '\0';
+
+    switch (args->cmd) {
+        case FF_ARPPING_CMD_PROBE:
+            ret = ff_arpping_request(args->ifname, args->source_ip,
+                args->target_ip, args->flags & FF_ARPPING_FLAG_FLUSH);
+            break;
+        case FF_ARPPING_CMD_POLL:
+            ret = ff_arpping_lookup(args->ifname, args->target_ip,
+                args->mac, &args->lle_flags);
+            break;
+        case FF_ARPPING_CMD_ANNOUNCE:
+            ret = ff_arpping_announce(args->ifname, args->target_ip);
+            break;
+        default:
+            ret = -EINVAL;
+            break;
+    }
+
+    msg->result = ret < 0 ? -ret : 0;
+}
+
+static inline void
 handle_default_msg(struct ff_msg *msg)
 {
     msg->result = ENOTSUP;
@@ -1998,6 +2026,9 @@ handle_msg(struct ff_msg *msg, uint16_t proc_id)
             handle_knictl_msg(msg);
             break;
 #endif
+        case FF_ARPPING:
+            handle_arpping_msg(msg);
+            break;
         default:
             handle_default_msg(msg);
             break;
