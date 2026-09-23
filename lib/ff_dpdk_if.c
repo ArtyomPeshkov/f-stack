@@ -2419,6 +2419,12 @@ main_loop(void *arg)
             lr->loop(lr->arg);
         }
 
+        /*
+         * Run deferred epoch callbacks (frees of unlinked stack objects)
+         * here, where no stack code is on the call stack.
+         */
+        ff_epoch_run_callbacks();
+
         idle_sleep_tsc = rte_rdtsc();
         if (likely(idle && idle_sleep)) {
             rte_delay_us_sleep(idle_sleep);

@@ -46,6 +46,27 @@ struct epoch {
 
 static struct epoch epoch_array[1];
 
+/*
+ * F-Stack runs the whole stack on one thread per process, so there are no
+ * concurrent epoch readers.  FreeBSD code still relies on epoch_call() to
+ * keep an unlinked object readable until the current traversal finishes,
+ * e.g. in6m_disconnect_locked() freeing ll_ifma from inside the
+ * CK_STAILQ_FOREACH over if_multiaddrs in mld_fasttimo_vnet().  Running the
+ * callback immediately turns that into a use-after-free.
+ *
+ * Queue the callbacks instead and run them from the main loop via
+ * ff_epoch_run_callbacks(), where no stack code is on the call stack.
+ * The queue linkage reuses the epoch_context embedded in each object.
+ */
+struct ff_epoch_cb {
+    epoch_callback_t   *cb;
+    struct ff_epoch_cb *next;
+};
+CTASSERT(sizeof(struct ff_epoch_cb) <= sizeof(struct epoch_context));
+
+static struct ff_epoch_cb *ff_epoch_head;
+static struct ff_epoch_cb **ff_epoch_tailp = &ff_epoch_head;
+
 void
 _epoch_enter_preempt(epoch_t epoch, epoch_tracker_t et EPOCH_FILE_LINE)
 {
@@ -67,7 +88,29 @@ epoch_wait_preempt(epoch_t epoch)
 void
 epoch_call(epoch_t epoch, epoch_callback_t callback, epoch_context_t ctx)
 {
-    callback(ctx);
+    struct ff_epoch_cb *e = (struct ff_epoch_cb *)ctx;
+
+    e->cb = callback;
+    e->next = NULL;
+    *ff_epoch_tailp = e;
+    ff_epoch_tailp = &e->next;
+}
+
+void
+ff_epoch_run_callbacks(void)
+{
+    struct ff_epoch_cb *e, *next;
+
+    /* Callbacks may call epoch_call() again, so loop until empty. */
+    while ((e = ff_epoch_head) != NULL) {
+        ff_epoch_head = NULL;
+        ff_epoch_tailp = &ff_epoch_head;
+        for (; e != NULL; e = next) {
+            /* Read next before the callback frees the object. */
+            next = e->next;
+            e->cb((epoch_context_t)e);
+        }
+    }
 }
 
 epoch_t
@@ -79,5 +122,5 @@ epoch_alloc(const char *name, int flags)
 void
 epoch_drain_callbacks(epoch_t epoch)
 {
-
+    ff_epoch_run_callbacks();
 }
