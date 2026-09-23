@@ -2412,18 +2412,21 @@ main_loop(void *arg)
 #ifdef FF_LOOPBACK_SUPPORT
         ff_swi_net_excute();
 #endif
+
+        /*
+         * Run deferred epoch callbacks (frees of unlinked stack objects)
+         * here, where no stack code is on the call stack.  Frees queued by
+         * the user loop below run on the next iteration.  Done before
+         * div_tsc so the work is accounted as sys time in ff top.
+         */
+        ff_epoch_run_callbacks();
+
         div_tsc = rte_rdtsc();
 
         if (likely(lr->loop != NULL && (!idle || cur_tsc - usch_tsc >= drain_tsc))) {
             usch_tsc = cur_tsc;
             lr->loop(lr->arg);
         }
-
-        /*
-         * Run deferred epoch callbacks (frees of unlinked stack objects)
-         * here, where no stack code is on the call stack.
-         */
-        ff_epoch_run_callbacks();
 
         idle_sleep_tsc = rte_rdtsc();
         if (likely(idle && idle_sleep)) {
