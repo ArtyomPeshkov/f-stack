@@ -91,5 +91,7 @@ int ff_rss_tbl_get_portrange(uint32_t saddr, uint32_t daddr, uint16_t sport,
 
 void ff_swi_net_excute(void);
 
+void ff_epoch_run_callbacks(void);
+
 #endif
 

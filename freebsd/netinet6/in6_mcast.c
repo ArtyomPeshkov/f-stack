@@ -520,6 +520,25 @@ static struct in6_multi_head in6m_free_list = SLIST_HEAD_INITIALIZER();
 static void in6m_release_task(void *arg __unused, int pending __unused);
 static struct task in6m_free_task = TASK_INITIALIZER(0, in6m_release_task, NULL);
 
+#ifdef FSTACK
+/*
+ * F-Stack starts no taskqueue threads, so taskqueue_in6m_free would never
+ * run and released groups would leak.  Run the release task from the main
+ * loop through the epoch callback queue instead, which keeps it
+ * asynchronous as callers expect.
+ */
+static struct epoch_context in6m_free_epoch_ctx;
+static int in6m_free_pending;
+
+static void
+in6m_release_epoch(epoch_context_t ctx __unused)
+{
+
+	in6m_free_pending = 0;
+	in6m_release_task(NULL, 0);
+}
+#endif
+
 void
 in6m_release_list_deferred(struct in6_multi_head *inmh)
 {
@@ -528,7 +547,14 @@ in6m_release_list_deferred(struct in6_multi_head *inmh)
 	mtx_lock(&in6_multi_free_mtx);
 	SLIST_CONCAT(&in6m_free_list, inmh, in6_multi, in6m_nrele);
 	mtx_unlock(&in6_multi_free_mtx);
+#ifndef FSTACK
 	taskqueue_enqueue(taskqueue_in6m_free, &in6m_free_task);
+#else
+	if (!in6m_free_pending) {
+		in6m_free_pending = 1;
+		NET_EPOCH_CALL(in6m_release_epoch, &in6m_free_epoch_ctx);
+	}
+#endif
 }
 
 void
@@ -539,7 +565,11 @@ in6m_release_wait(void *arg __unused)
 	 * Make sure all pending multicast addresses are freed before
 	 * the VNET or network device is destroyed:
 	 */
+#ifndef FSTACK
 	taskqueue_drain_all(taskqueue_in6m_free);
+#else
+	in6m_release_task(NULL, 0);
+#endif
 }
 #ifdef VIMAGE
 /* XXX-BZ FIXME, see D24914. */
