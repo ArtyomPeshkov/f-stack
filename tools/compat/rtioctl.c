@@ -100,7 +100,6 @@ rtioctl(char *data, unsigned len, unsigned read_len)
     msg->route.maxlen = maxlen;
     msg->route.data = msg->buf_addr;
     memcpy(msg->route.data, data, len);
-    msg->buf_addr += len;
 
     int ret = ff_ipc_send(msg);
     if (ret < 0) {
