@@ -11,8 +11,7 @@ usage(void)
 
 int traffic_status(struct ff_traffic_args *traffic)
 {
-    int            ret;
-    struct ff_msg *msg, *retmsg = NULL;
+    struct ff_msg *msg;
 
     msg = ff_ipc_msg_alloc();
     if (msg == NULL) {
@@ -21,26 +20,11 @@ int traffic_status(struct ff_traffic_args *traffic)
     }
 
     msg->msg_type = FF_TRAFFIC;
-    ret = ff_ipc_send(msg);
-    if (ret < 0) {
-        errno = EPIPE;
-        ff_ipc_msg_free(msg);
+    if (ff_ipc_call(msg) < 0) {
         return -1;
     }
 
-    do {
-        if (retmsg != NULL) {
-            ff_ipc_msg_free(retmsg);
-        }
-
-        ret = ff_ipc_recv(&retmsg, msg->msg_type);
-        if (ret < 0) {
-            errno = EPIPE;
-            return -1;
-        }
-    } while (msg != retmsg);
-
-    *traffic = retmsg->traffic;
+    *traffic = msg->traffic;
 
     ff_ipc_msg_free(msg);
 

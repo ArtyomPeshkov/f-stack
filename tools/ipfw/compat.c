@@ -35,7 +35,7 @@
 static int
 ipfw_ctl(int cmd, int level, int optname, void *optval, socklen_t *optlen)
 {
-    struct ff_msg *msg, *retmsg = NULL;
+    struct ff_msg *msg;
     int len;
 
     switch (cmd) {
@@ -73,33 +73,20 @@ ipfw_ctl(int cmd, int level, int optname, void *optval, socklen_t *optlen)
     memcpy(msg->ipfw.optval, optval, *optlen);
     memcpy(msg->ipfw.optlen, optlen, sizeof(socklen_t));
 
-    int ret = ff_ipc_send(msg);
-    if (ret < 0) {
-        errno = EPIPE;
-        ff_ipc_msg_free(msg);
+    if (ff_ipc_call(msg) < 0) {
         return -1;
     }
 
-    do {
-        if (retmsg != NULL) {
-            ff_ipc_msg_free(retmsg);
-        }
-        ret = ff_ipc_recv(&retmsg, msg->msg_type);
-        if (ret < 0) {
-            errno = EPIPE;
-            return -1;
-        }
-    } while (msg != retmsg);
-
-    if (retmsg->result != 0) {
+    int ret;
+    if (msg->result != 0) {
         ret = -1;
-        errno = retmsg->result;
+        errno = msg->result;
     } else {
         ret = 0;
 
         if (cmd == FF_IPFW_GET) {
-            memcpy(optval, retmsg->ipfw.optval, *(retmsg->ipfw.optlen));
-            memcpy(optlen, retmsg->ipfw.optlen, sizeof(socklen_t));
+            memcpy(optval, msg->ipfw.optval, *(msg->ipfw.optlen));
+            memcpy(optlen, msg->ipfw.optlen, sizeof(socklen_t));
         }
     }
 

@@ -28,7 +28,7 @@ All other directories are useful tools ported from FreeBSD.
 Since F-Stack is multi-process architecture and every process has an independent stack, so we must communicate with every F-Stack process.
 Each tool add an option `-p`(Which F-Stack process to communicate with, default 0), except that, it is same with the original FreeBSD.
 
-Note that these tools must be executed serially.
+These tools may be run concurrently: requests to the same F-Stack process are serialized inside `ff_ipc_call()` (see `compat/ff_ipc.c`), which is the only way for a tool to talk to F-Stack. The lock is an `flock()` on `/var/run/dpdk/rte/ff_ipc_<proc_id>.lock`, so `lslocks` shows which tool holds it.
 
 # sysctl
 Usage:
@@ -357,6 +357,7 @@ int main()
 
     char *buf = msg->buf_addr;
 
+    msg->msg_type = FF_HELLOWORLD;
     msg->helloworld.request = buf;
     memcpy(msg->helloworld.request, "hello", 5);
     msg->helloworld.req_len = 5;
@@ -365,11 +366,11 @@ int main()
     msg->helloworld.reply = buf;
     msg->helloworld.rep_len = 10;
 
-    ff_ipc_send(msg, 0);
+    /* On failure msg is consumed and must not be freed. */
+    if (ff_ipc_call(msg) < 0)
+        return 1;
 
-    struct ff_msg *retmsg;
-    ff_ipc_recv(retmsg, 0);
-    assert(remsg==msg);
+    /* The reply is in msg->helloworld.reply. */
 
     ff_ipc_msg_free(msg);
 }

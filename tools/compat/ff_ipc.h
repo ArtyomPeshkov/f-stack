@@ -37,7 +37,17 @@ void ff_ipc_exit(void);
 struct ff_msg *ff_ipc_msg_alloc(void);
 int ff_ipc_msg_free(struct ff_msg *msg);
 
-int ff_ipc_send(const struct ff_msg *msg);
-int ff_ipc_recv(struct ff_msg **msg, enum FF_MSG_TYPE msg_type);
+/*
+ * Send msg to the F-Stack process set by ff_set_proc_id() and wait for
+ * the reply, which F-Stack writes back into msg itself.
+ *
+ * This is the only way to talk to F-Stack. Requests to the same F-Stack
+ * process are serialized here, so tools may run concurrently.
+ *
+ * Returns 0 on success: msg holds the reply, free it with ff_ipc_msg_free().
+ * Returns -1 with errno set on failure: msg is consumed (it may still be
+ * in flight) and must not be touched again.
+ */
+int ff_ipc_call(struct ff_msg *msg);
 
 #endif

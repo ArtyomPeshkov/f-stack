@@ -31,6 +31,11 @@
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_malloc.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include "ff_ipc.h"
@@ -101,8 +106,13 @@ ff_ipc_msg_alloc(void)
         }
     }
 
+    /*
+     * Every tool runs as lcore 0 of its own secondary process, so the
+     * per-lcore cache would be shared by concurrent tools without any
+     * locking: bypass it, the pool's ring is multi-process safe.
+     */
     void *msg;
-    if (rte_mempool_get(message_pool, &msg) < 0) {
+    if (rte_mempool_generic_get(message_pool, &msg, 1, NULL) < 0) {
         printf("get buffer from message pool failed.\n");
         return NULL;
     }
@@ -125,12 +135,12 @@ ff_ipc_msg_free(struct ff_msg *msg)
         msg->original_buf = NULL;
     }
 
-    rte_mempool_put(message_pool, msg);
+    rte_mempool_generic_put(message_pool, (void **)&msg, 1, NULL);
 
     return 0;
 }
 
-int
+static int
 ff_ipc_send(const struct ff_msg *msg)
 {
     int ret;
@@ -158,7 +168,7 @@ ff_ipc_send(const struct ff_msg *msg)
     return 0;
 }
 
-int
+static int
 ff_ipc_recv(struct ff_msg **msg, enum FF_MSG_TYPE msg_type)
 {
     int ret, i;
@@ -189,4 +199,93 @@ ff_ipc_recv(struct ff_msg **msg, enum FF_MSG_TYPE msg_type)
     }
 
     return ret;
+}
+
+/*
+ * Tools are separate DPDK secondary processes sharing the msg rings of an
+ * F-Stack process: the in ring is single-producer, every out ring is
+ * single-consumer, and a reply can only be matched to its request by
+ * whoever dequeues it. So only one request per F-Stack process may be in
+ * flight at a time. That is enforced with flock() on a per-process lock
+ * file: the kernel drops it if the holder dies, and every call opens its
+ * own file description, so it serializes threads as well as processes.
+ */
+static int
+ff_ipc_lock(void)
+{
+    char path[PATH_MAX];
+    int fd;
+
+    snprintf(path, sizeof(path), "%s/ff_ipc_%u.lock",
+        rte_eal_get_runtime_dir(), ff_proc_id);
+
+    fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        printf("open %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    while (flock(fd, LOCK_EX) < 0) {
+        if (errno != EINTR) {
+            printf("flock %s failed: %s\n", path, strerror(errno));
+            close(fd);
+            return -1;
+        }
+    }
+
+    return fd;
+}
+
+int
+ff_ipc_call(struct ff_msg *msg)
+{
+    enum FF_MSG_TYPE msg_type = msg->msg_type;
+    struct ff_msg *retmsg;
+    int fd, ret;
+
+    if (inited == 0) {
+        printf("ff ipc not inited\n");
+        errno = EPIPE;
+        return -1;
+    }
+
+    fd = ff_ipc_lock();
+    if (fd < 0) {
+        ff_ipc_msg_free(msg);
+        errno = EPIPE;
+        return -1;
+    }
+
+    ret = ff_ipc_send(msg);
+    if (ret < 0) {
+        close(fd);
+        ff_ipc_msg_free(msg);
+        errno = EPIPE;
+        return -1;
+    }
+
+    for (;;) {
+        ret = ff_ipc_recv(&retmsg, msg_type);
+        if (ret < 0) {
+            /*
+             * Timed out: msg is still in flight, its late reply will be
+             * freed by the next call that dequeues it below.
+             */
+            close(fd);
+            errno = EPIPE;
+            return -1;
+        }
+
+        if (retmsg == msg) {
+            break;
+        }
+
+        /* Late reply to an earlier call that timed out. */
+        ff_ipc_msg_free(retmsg);
+    }
+
+    /* Closing the only descriptor of the lock file releases the lock. */
+    close(fd);
+
+    return 0;
 }

@@ -49,7 +49,7 @@
 int
 ioctl_va(int fd, unsigned long com, void *data, int argc, ...)
 {
-    struct ff_msg *msg, *retmsg = NULL;
+    struct ff_msg *msg;
     unsigned size;
     void *cpy_mem;
     size_t offset, clen;
@@ -127,29 +127,16 @@ ioctl_va(int fd, unsigned long com, void *data, int argc, ...)
         memcpy(buf_addr, cpy_mem, clen);
     }
 
-    int ret = ff_ipc_send(msg);
-    if (ret < 0) {
-        errno = EPIPE;
-        ff_ipc_msg_free(msg);
+    if (ff_ipc_call(msg) < 0) {
         return -1;
     }
 
-    do {
-        if (retmsg != NULL) {
-            ff_ipc_msg_free(retmsg);
-        }
-        ret = ff_ipc_recv(&retmsg, msg->msg_type);
-        if (ret < 0) {
-            errno = EPIPE;
-            return -1;
-        }
-    } while (msg != retmsg);
-
-    if (retmsg->result == 0) {
+    int ret;
+    if (msg->result == 0) {
         ret = 0;
 
         if (com & IOC_OUT) {
-            memcpy(data, retmsg->ioctl.data, size);
+            memcpy(data, msg->ioctl.data, size);
             if (argc == 3) {
                 memcpy(cpy_mem, buf_addr, clen);
                 char *ptr = (char *)data + offset;
@@ -158,7 +145,7 @@ ioctl_va(int fd, unsigned long com, void *data, int argc, ...)
         }
     } else {
         ret = -1;
-        errno = retmsg->result;
+        errno = msg->result;
     }
 
     ff_ipc_msg_free(msg);

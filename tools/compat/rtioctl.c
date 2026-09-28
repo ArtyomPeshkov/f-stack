@@ -73,7 +73,7 @@ rt_close(int fd)
 int
 rtioctl(char *data, unsigned len, unsigned read_len)
 {
-    struct ff_msg *msg, *retmsg = NULL;
+    struct ff_msg *msg;
     unsigned maxlen;
 
     msg = ff_ipc_msg_alloc();
@@ -101,33 +101,20 @@ rtioctl(char *data, unsigned len, unsigned read_len)
     msg->route.data = msg->buf_addr;
     memcpy(msg->route.data, data, len);
 
-    int ret = ff_ipc_send(msg);
-    if (ret < 0) {
-        errno = EPIPE;
-        ff_ipc_msg_free(msg);
+    if (ff_ipc_call(msg) < 0) {
         return -1;
     }
 
-    do {
-        if (retmsg != NULL) {
-            ff_ipc_msg_free(retmsg);
-        }
-        ret = ff_ipc_recv(&retmsg, msg->msg_type);
-        if (ret < 0) {
-            errno = EPIPE;
-            return -1;
-        }
-    } while (msg != retmsg);
-
-    if (retmsg->result == 0) {
-        ret = retmsg->route.len;
+    int ret;
+    if (msg->result == 0) {
+        ret = msg->route.len;
 
         if (!rt_shutdown_rd && read_len > 0) {
-            memcpy(data, retmsg->route.data, retmsg->route.len);
+            memcpy(data, msg->route.data, msg->route.len);
         }
     } else {
         ret = -1;
-        errno = retmsg->result;
+        errno = msg->result;
     }
 
     ff_ipc_msg_free(msg);
