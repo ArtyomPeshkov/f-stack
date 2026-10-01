@@ -1131,3 +1131,9 @@ ff_mbuf_set_timestamp(void *hdr, uint64_t timestamp) {
     m->m_flags |= M_TSTMP | M_TSTMP_HPREC;
 }
 
+void
+ff_mbuf_set_lro_info(void *hdr, uint16_t nsegs) {
+    struct mbuf *m = (struct mbuf *)hdr;
+    /* Same contract as FreeBSD's software LRO (tcp_lro.c). */
+    m->m_pkthdr.lro_nsegs = nsegs;
+}
