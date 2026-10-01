@@ -1492,22 +1492,43 @@ static void
 ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt,
     uint16_t nsegs)
 {
-    uint8_t rx_csum = ctx->hw_features.rx_csum;
-    if (rx_csum) {
-        if (pkt->ol_flags & (RTE_MBUF_F_RX_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD)) {
+    uint8_t ip_csum_ok = 0, l4_csum_ok = 0;
+    if (ctx->hw_features.rx_csum) {
+        /*
+         * The IP and L4 statuses are 2-bit codes, not bit flags: *_CKSUM_NONE
+         * has the BAD bit set but means the NIC verified the data and only
+         * left the checksum field unfilled, so compare whole codes.
+         */
+        uint64_t ip_csum = pkt->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK;
+        uint64_t l4_csum = pkt->ol_flags & RTE_MBUF_F_RX_L4_CKSUM_MASK;
+
+        if (ip_csum == RTE_MBUF_F_RX_IP_CKSUM_BAD ||
+            l4_csum == RTE_MBUF_F_RX_L4_CKSUM_BAD) {
             rte_pktmbuf_free(pkt);
             return;
         }
+
+        /*
+         * Only mark a checksum verified when the NIC says so and leave
+         * UNKNOWN to the stack. mlx5 never reports BAD: a wrong checksum
+         * comes back as UNKNOWN.
+         */
+        ip_csum_ok = ip_csum == RTE_MBUF_F_RX_IP_CKSUM_GOOD ||
+                     ip_csum == RTE_MBUF_F_RX_IP_CKSUM_NONE;
+        l4_csum_ok = l4_csum == RTE_MBUF_F_RX_L4_CKSUM_GOOD ||
+                     l4_csum == RTE_MBUF_F_RX_L4_CKSUM_NONE;
     }
 
     void *data = rte_pktmbuf_mtod(pkt, void*);
     uint16_t len = rte_pktmbuf_data_len(pkt);
 
-    void *hdr = ff_mbuf_gethdr(pkt, pkt->pkt_len, data, len, rx_csum);
+    void *hdr = ff_mbuf_gethdr(pkt, pkt->pkt_len, data, len, 0);
     if (hdr == NULL) {
         rte_pktmbuf_free(pkt);
         return;
     }
+
+    ff_mbuf_set_rx_csum(hdr, ip_csum_ok, l4_csum_ok);
 
     /*
      * Pass the number of merged segments like FreeBSD's software LRO does,
