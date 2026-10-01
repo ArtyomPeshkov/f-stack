@@ -55,6 +55,8 @@
 #include <rte_eth_bond.h>
 #include <rte_eth_bond_8023ad.h>
 #include <rte_mbuf_dyn.h>
+#include <rte_gro.h>
+#include <rte_net.h>
 
 #include "ff_dpdk_if.h"
 #include "ff_dpdk_pcap.h"
@@ -742,6 +744,30 @@ init_port_start(void)
                     ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "RX checksum offload supported\n");
                     port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_CHECKSUM;
                     pconf->hw_features.rx_csum = 1;
+                }
+
+                /*
+                 * Set software GRO (Generic Receive Offload). It merges TCP
+                 * segments of the same flow received in one RX burst before
+                 * they reach the stack. rte_gro neither checks nor recomputes
+                 * checksums, so only segments whose checksums the NIC
+                 * verified are merged, which needs RX checksum offload.
+                 *
+                 * Check this port's own request rather than
+                 * hw_features.rx_csum: a bond's members run this loop first
+                 * and set rx_csum, but the bond hands its own rxmode
+                 * offloads to them when it starts.
+                 */
+                pconf->hw_features.rx_gro = 0;
+                if (ff_global_cfg.dpdk.gro) {
+                    if (port_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_CHECKSUM) {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "GRO is enabled\n");
+                        pconf->hw_features.rx_gro = 1;
+                    } else {
+                        ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "GRO needs RX checksum offload, GRO is disabled\n");
+                    }
+                } else {
+                    ff_log(FF_LOG_INFO, FF_LOGTYPE_FSTACK_LIB, "GRO is disabled\n");
                 }
 
                 if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
@@ -1458,24 +1484,58 @@ ff_dpdk_init(int argc, char **argv)
     return 0;
 }
 
+/*
+ * Hand a packet to the stack. nsegs is the number of TCP segments GRO merged
+ * into it, 0 if it was not merged.
+ */
 static void
-ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt)
+ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt,
+    uint16_t nsegs)
 {
-    uint8_t rx_csum = ctx->hw_features.rx_csum;
-    if (rx_csum) {
-        if (pkt->ol_flags & (RTE_MBUF_F_RX_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD)) {
+    uint8_t ip_csum_ok = 0, l4_csum_ok = 0;
+    if (ctx->hw_features.rx_csum) {
+        /*
+         * The IP and L4 statuses are 2-bit codes, not bit flags: *_CKSUM_NONE
+         * has the BAD bit set but means the NIC verified the data and only
+         * left the checksum field unfilled, so compare whole codes.
+         */
+        uint64_t ip_csum = pkt->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK;
+        uint64_t l4_csum = pkt->ol_flags & RTE_MBUF_F_RX_L4_CKSUM_MASK;
+
+        if (ip_csum == RTE_MBUF_F_RX_IP_CKSUM_BAD ||
+            l4_csum == RTE_MBUF_F_RX_L4_CKSUM_BAD) {
             rte_pktmbuf_free(pkt);
             return;
         }
+
+        /*
+         * Only mark a checksum verified when the NIC says so and leave
+         * UNKNOWN to the stack. mlx5 never reports BAD: a wrong checksum
+         * comes back as UNKNOWN.
+         */
+        ip_csum_ok = ip_csum == RTE_MBUF_F_RX_IP_CKSUM_GOOD ||
+                     ip_csum == RTE_MBUF_F_RX_IP_CKSUM_NONE;
+        l4_csum_ok = l4_csum == RTE_MBUF_F_RX_L4_CKSUM_GOOD ||
+                     l4_csum == RTE_MBUF_F_RX_L4_CKSUM_NONE;
     }
 
     void *data = rte_pktmbuf_mtod(pkt, void*);
     uint16_t len = rte_pktmbuf_data_len(pkt);
 
-    void *hdr = ff_mbuf_gethdr(pkt, pkt->pkt_len, data, len, rx_csum);
+    void *hdr = ff_mbuf_gethdr(pkt, pkt->pkt_len, data, len, 0);
     if (hdr == NULL) {
         rte_pktmbuf_free(pkt);
         return;
+    }
+
+    ff_mbuf_set_rx_csum(hdr, ip_csum_ok, l4_csum_ok);
+
+    /*
+     * Pass the number of merged segments like FreeBSD's software LRO does,
+     * tcp_input() uses it for congestion control and statistics.
+     */
+    if (nsegs > 1) {
+        ff_mbuf_set_lro_info(hdr, nsegs);
     }
 
     if (pkt->ol_flags & RTE_MBUF_F_RX_VLAN_STRIPPED) {
@@ -1506,6 +1566,152 @@ ff_veth_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *pkt)
     }
 
     ff_veth_process_packet(ctx->ifp, hdr);
+}
+
+#define FF_GRO_PTYPE_TCP4 \
+    (RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_TCP)
+#define FF_GRO_PTYPE_TCP6 \
+    (RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_TCP)
+
+static const struct rte_gro_param ff_gro_param = {
+    .gro_types = RTE_GRO_TCP_IPV4 | RTE_GRO_TCP_IPV6,
+    .max_flow_num = MAX_PKT_BURST,
+    .max_item_per_flow = MAX_PKT_BURST,
+};
+
+/* Packets on their way to the stack, merged by GRO once per RX burst. */
+static struct rte_mbuf *gro_pkts[MAX_PKT_BURST];
+static uint16_t nb_gro_pkts;
+
+/*
+ * Decide whether GRO may merge this packet and describe its headers for
+ * rte_gro, which reads packet_type and l2/l3/l4_len instead of parsing the
+ * packet. rte_gro neither checks nor recomputes checksums and the merged
+ * packet goes to the stack as checksum-verified, so only packets whose IP
+ * and TCP checksums the NIC verified are eligible. Packets rte_gro would
+ * not merge anyway (no payload, SYN/RST/URG/ECN flags) are not eligible
+ * either, so that ff_veth_input_flush() keeps them in place.
+ *
+ * rte_net_get_ptype() reports an in-band VLAN tag, IPv4 options, IPv6
+ * extension headers and fragments as other packet types, which rte_gro does
+ * not handle. Its flow key has no VLAN: a stripped tag is not compared, two
+ * flows would also need the same MACs, addresses, ports, ACK number and
+ * adjacent sequence numbers to be merged by mistake.
+ */
+static int
+ff_gro_prepare(struct rte_mbuf *m)
+{
+    uint64_t ip_csum = m->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK;
+    uint64_t l4_csum = m->ol_flags & RTE_MBUF_F_RX_L4_CKSUM_MASK;
+    struct rte_net_hdr_lens hdr_lens;
+    const struct rte_tcp_hdr *tcp;
+    const char *l3;
+    uint32_t ptype, ip_len, hdr_len;
+
+    /* rte_gro only takes single-segment packets. */
+    if (m->nb_segs != 1 ||
+        (l4_csum != RTE_MBUF_F_RX_L4_CKSUM_GOOD &&
+         l4_csum != RTE_MBUF_F_RX_L4_CKSUM_NONE)) {
+        return 0;
+    }
+
+    ptype = rte_net_get_ptype(m, &hdr_lens,
+        RTE_PTYPE_L2_MASK | RTE_PTYPE_L3_MASK | RTE_PTYPE_L4_MASK);
+    l3 = rte_pktmbuf_mtod_offset(m, const char *, hdr_lens.l2_len);
+    if (ptype == FF_GRO_PTYPE_TCP4) {
+        if (ip_csum != RTE_MBUF_F_RX_IP_CKSUM_GOOD &&
+            ip_csum != RTE_MBUF_F_RX_IP_CKSUM_NONE) {
+            return 0;
+        }
+        ip_len = rte_be_to_cpu_16(
+            ((const struct rte_ipv4_hdr *)l3)->total_length);
+    } else if (ptype == FF_GRO_PTYPE_TCP6) {
+        ip_len = rte_be_to_cpu_16(
+            ((const struct rte_ipv6_hdr *)l3)->payload_len) + hdr_lens.l3_len;
+    } else {
+        return 0;
+    }
+
+    /* The IP length, not pkt_len, tells a pure ACK from Ethernet padding. */
+    hdr_len = hdr_lens.l2_len + hdr_lens.l3_len + hdr_lens.l4_len;
+    tcp = (const struct rte_tcp_hdr *)(l3 + hdr_lens.l3_len);
+    if (m->data_len < hdr_len ||
+        hdr_lens.l2_len + ip_len > m->pkt_len ||
+        hdr_lens.l2_len + ip_len <= hdr_len ||
+        (tcp->tcp_flags & ~(RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG |
+            RTE_TCP_FIN_FLAG))) {
+        return 0;
+    }
+
+    m->l2_len = hdr_lens.l2_len;
+    m->l3_len = hdr_lens.l3_len;
+    m->l4_len = hdr_lens.l4_len;
+    m->packet_type = ptype;
+    return 1;
+}
+
+/*
+ * Merge a run of GRO-eligible packets and hand the result to the stack.
+ * rte_gro chains at most 20 single-segment packets, each within the
+ * RTE_MBUF_DEFAULT_BUF_SIZE mbufs of pktmbuf_pool, so a merged packet stays
+ * below the 16-bit length ff_mbuf_gethdr() takes.
+ */
+static void
+ff_gro_input(const struct ff_dpdk_if_context *ctx, struct rte_mbuf **pkts,
+    uint16_t nb)
+{
+    uint16_t i;
+
+    if (nb > 1) {
+        nb = rte_gro_reassemble_burst(pkts, nb, &ff_gro_param);
+    }
+
+    for (i = 0; i < nb; i++) {
+        /* Eligible packets have one segment, so a chain is a merge. */
+        ff_veth_input(ctx, pkts[i],
+            pkts[i]->nb_segs > 1 ? pkts[i]->nb_segs : 0);
+    }
+}
+
+/*
+ * Hand the deferred packets to the stack, merging runs of GRO-eligible
+ * packets. A packet GRO cannot merge (pure ACK, RST, FIN without data, an
+ * unverified checksum, non-TCP) ends the run before it and is delivered in
+ * its original place, so it never overtakes data that arrived before it.
+ */
+static void
+ff_veth_input_flush(const struct ff_dpdk_if_context *ctx)
+{
+    uint16_t i, start = 0, nb = nb_gro_pkts;
+
+    nb_gro_pkts = 0;
+    for (i = 0; i < nb; i++) {
+        if (ff_gro_prepare(gro_pkts[i])) {
+            continue;
+        }
+        ff_gro_input(ctx, &gro_pkts[start], i - start);
+        ff_veth_input(ctx, gro_pkts[i], 0);
+        start = i + 1;
+    }
+    ff_gro_input(ctx, &gro_pkts[start], nb - start);
+}
+
+/*
+ * Hand a packet to the stack, deferred to the end of the RX burst when GRO
+ * is enabled so that segments of the same flow can be merged.
+ */
+static inline void
+ff_veth_input_defer(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *m)
+{
+    if (!ctx->hw_features.rx_gro) {
+        ff_veth_input(ctx, m, 0);
+        return;
+    }
+
+    gro_pkts[nb_gro_pkts++] = m;
+    if (nb_gro_pkts == MAX_PKT_BURST) {
+        ff_veth_input_flush(ctx);
+    }
 }
 
 static enum FilterReturn
@@ -1753,14 +1959,14 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                 }
             }
 #endif
-            ff_veth_input(ctx, rtem);
+            ff_veth_input(ctx, rtem, 0);
 #ifdef FF_KNI
         } else if (enable_kni) {
             if (knictl_action == FF_KNICTL_ACTION_ALL_TO_KNI){
                 ff_add_vlan_tag(rtem);
                 ff_kni_enqueue(filter, port_id, rtem);
             } else if (knictl_action == FF_KNICTL_ACTION_ALL_TO_FF){
-                ff_veth_input(ctx, rtem);
+                ff_veth_input_defer(ctx, rtem);
             } else if (knictl_action == FF_KNICTL_ACTION_DEFAULT){
                 if (enable_kni &&
                         ((filter == FILTER_KNI && kni_accept) ||
@@ -1768,14 +1974,14 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                     ff_add_vlan_tag(rtem);
                     ff_kni_enqueue(filter, port_id, rtem);
                 } else {
-                    ff_veth_input(ctx, rtem);
+                    ff_veth_input_defer(ctx, rtem);
                 }
             } else {
-                ff_veth_input(ctx, rtem);
+                ff_veth_input_defer(ctx, rtem);
             }
 #endif
         } else {
-            ff_veth_input(ctx, rtem);
+            ff_veth_input_defer(ctx, rtem);
         }
     }
 }
@@ -1791,6 +1997,7 @@ process_dispatch_ring(uint16_t port_id, uint16_t queue_id,
 
     if(nb_rb > 0) {
         process_packets(port_id, queue_id, pkts_burst, nb_rb, ctx, 1);
+        ff_veth_input_flush(ctx);
     }
 
     return nb_rb;
@@ -2406,6 +2613,9 @@ main_loop(void *arg)
             for (; j < nb_rx; j++) {
                 process_packets(port_id, queue_id, &pkts_burst[j], 1, ctx, 0);
             }
+
+            /* Hand the burst to the stack, merged by GRO if enabled */
+            ff_veth_input_flush(ctx);
         }
 
         process_msg_ring(qconf->proc_id, pkts_burst);

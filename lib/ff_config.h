@@ -108,6 +108,7 @@ extern char *dpdk_argv[DPDK_CONFIG_NUM + 1];
 struct ff_hw_features {
     uint8_t rx_csum;
     uint8_t rx_lro;
+    uint8_t rx_gro;
     uint8_t tx_csum_ip;
     uint8_t tx_csum_l4;
     uint8_t tx_tso;
@@ -283,6 +284,7 @@ struct ff_config {
         int nb_vlan_filter;
         uint16_t vlan_filter_id[DPDK_MAX_VLAN_FILTER];
         int symmetric_rss;
+        int gro;
 
         /* sleep x microseconds when no pkts incomming */
         unsigned idle_sleep;

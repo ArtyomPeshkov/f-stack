@@ -53,5 +53,7 @@ void ff_veth_free_softc(void *softc);
 
 void ff_mbuf_set_vlan_info(void *hdr, uint16_t vlan_tci);
 void ff_mbuf_set_timestamp(void *hdr, uint64_t timestamp);
+void ff_mbuf_set_rx_csum(void *hdr, uint8_t ip_valid, uint8_t l4_valid);
+void ff_mbuf_set_lro_info(void *hdr, uint16_t nsegs);
 
 #endif /* ifndef _FSTACK_VETH_H */
