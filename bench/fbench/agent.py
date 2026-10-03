@@ -14,6 +14,7 @@ import time
 import traceback
 
 from . import VERSION
+from . import build as buildmod
 from . import cpu as cpumod
 from . import dperf as dp
 from . import fstack as fs
@@ -90,7 +91,8 @@ class Agent(object):
     def cmd_hello(self, digest, version):
         same = digest == self.cfg.digest()
         return {"version": VERSION, "hostname": socket.gethostname(), "digest_ok": same,
-                "digest": self.cfg.digest(), "client_version_ok": version == VERSION}
+                "digest": self.cfg.digest(), "client_version_ok": version == VERSION,
+                "stale": buildmod.stale_binaries(self.cfg)}
 
     def cmd_prepare(self):
         node = nicmod.numa_node(self.m.pci[0])

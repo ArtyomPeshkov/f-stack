@@ -6,7 +6,7 @@ import glob
 import os
 import shutil
 
-from .util import die, info, run, warn
+from .util import die, info, run, warn, which
 
 PC_SUBDIRS = ("lib/x86_64-linux-gnu/pkgconfig", "lib64/pkgconfig", "lib/pkgconfig",
               "lib/aarch64-linux-gnu/pkgconfig", "share/pkgconfig")
@@ -55,6 +55,55 @@ def jobs():
     return str(max(1, os.cpu_count() or 1))
 
 
+def newest_mtime(paths):
+    m = 0.0
+    for p in paths:
+        try:
+            m = max(m, os.path.getmtime(p))
+        except OSError:
+            pass
+    return m
+
+
+def dpdk_libs_mtime(cfg):
+    """Newest DPDK static library: binaries linked before it are stale (DPDK
+    primary and secondary processes, e.g. F-Stack workers and ff_* tools,
+    must come from the same DPDK build)."""
+    files = []
+    # meson build dir: lib/, drivers/; install prefix: lib/, lib64/, lib/<triplet>/
+    for pat in ("lib*/librte_*.a", "lib/*/librte_*.a", "drivers/librte_*.a"):
+        files += glob.glob(os.path.join(cfg.dpdk_build, pat))
+    return newest_mtime(files)
+
+
+def older_than(path, mtime):
+    try:
+        return os.path.getmtime(path) < mtime
+    except OSError:
+        return True
+
+
+def update_dpdk(cfg):
+    """Incremental `ninja` in a meson build dir, so that DPDK source changes
+    (e.g. the bonding fix in dpdk/drivers/net/bonding) reach every binary."""
+    if not os.path.isfile(os.path.join(cfg.dpdk_build, "build.ninja")):
+        return
+    if not which("ninja"):
+        warn("ninja not found: cannot check that %s is up to date" % cfg.dpdk_build)
+        return
+    rc, out = run(["ninja", "-C", cfg.dpdk_build], check=False, timeout=7200)
+    if rc != 0:
+        die("ninja -C %s failed:\n%s" % (cfg.dpdk_build, out[-3000:]))
+    if "no work to do" not in out:
+        info("DPDK rebuilt in %s" % cfg.dpdk_build)
+
+
+def fstack_lib_sources_mtime(cfg):
+    lib = os.path.join(cfg.fstack_dir, "lib")
+    return newest_mtime(glob.glob(os.path.join(lib, "*.[ch]")) +
+                        [os.path.join(lib, "Makefile"), os.path.join(lib, "ff_api.symlist")])
+
+
 DPERF_CSUM_BUG = "csum_tcp = csum_update_u32(csum_tcp, htonl(sk->snd_nxt), htonl(sk->rcv_nxt));"
 DPERF_CSUM_FIX = "csum_tcp = csum_update_u32(csum_tcp, htonl(sk->snd_una), htonl(sk->rcv_nxt));"
 
@@ -84,7 +133,11 @@ def build_dperf(cfg, env, force=False):
     out = os.path.join(cfg.dperf_dir, "build", "dperf")
     if fix_dperf_vxlan_csum(cfg.dperf_dir):
         force = True
-    if force or not os.path.isfile(out):
+    if not force and older_than(out, dpdk_libs_mtime(cfg)):
+        if os.path.isfile(out):
+            info("dperf is older than the DPDK libraries, rebuilding")
+        force = True
+    if force:
         info("building dperf in %s" % cfg.dperf_dir)
         run(["make", "-C", cfg.dperf_dir, "clean"], env=env, check=False, timeout=120)
         run(["make", "-C", cfg.dperf_dir, "-j", jobs()], env=env, timeout=1800)
@@ -101,7 +154,10 @@ def build_dperf(cfg, env, force=False):
 
 def build_fstack_lib(cfg, env, force=False):
     lib = os.path.join(cfg.fstack_dir, "lib")
-    if force or not os.path.isfile(os.path.join(lib, "libfstack.a")):
+    # `make` re-archives libfstack.a on every run, so it is run only when the
+    # library is missing or older than its sources or than DPDK
+    if force or older_than(os.path.join(lib, "libfstack.a"),
+                           max(fstack_lib_sources_mtime(cfg), dpdk_libs_mtime(cfg))):
         info("building libfstack")
         if force:
             run(["make", "-C", lib, "clean"], env=env, check=False, timeout=300)
@@ -109,12 +165,19 @@ def build_fstack_lib(cfg, env, force=False):
     return os.path.join(lib, "libfstack.a")
 
 
+TOOLS = ("ifconfig", "route", "arp", "top", "netstat")
+
+
 def build_tools(cfg, env, force=False):
     sbin = os.path.join(cfg.fstack_dir, "tools", "sbin")
-    need = ("ifconfig", "route", "arp", "top", "netstat")
-    if force or not all(os.path.isfile(os.path.join(sbin, t)) for t in need):
+    tools = os.path.join(cfg.fstack_dir, "tools")
+    stale = any(older_than(os.path.join(sbin, t), dpdk_libs_mtime(cfg)) for t in TOOLS)
+    if force or stale:
         info("building F-Stack tools (ff_ifconfig, ff_route, ff_arp, ff_top, ...)")
-        run(["make", "-C", os.path.join(cfg.fstack_dir, "tools")], env=env, timeout=3600)
+        # the tools are DPDK secondary processes of the F-Stack application:
+        # relink them from scratch against the current DPDK
+        run(["make", "-C", tools, "clean"], env=env, check=False, timeout=600)
+        run(["make", "-C", tools], env=env, timeout=3600)
     return sbin
 
 
@@ -130,9 +193,14 @@ def build_nginx(cfg, env, variant, force=False):
     """variant: 'fstack' (--with-ff_module) or 'kernel' (same source, plain sockets)."""
     prefix = os.path.join(cfg.install_dir, "nginx-%s" % variant)
     binary = os.path.join(prefix, "sbin", "nginx")
+    # both variants link libfstack and DPDK
+    deps = max(dpdk_libs_mtime(cfg),
+               newest_mtime([os.path.join(cfg.fstack_dir, "lib", "libfstack.a")]))
     if os.path.isfile(binary) and not force:
-        info("nginx-%s already built: %s" % (variant, binary))
-        return binary
+        if not older_than(binary, deps):
+            info("nginx-%s is up to date: %s" % (variant, binary))
+            return binary
+        info("nginx-%s is older than libfstack/DPDK, rebuilding" % variant)
     src = nginx_src(cfg)
     bdir = os.path.join(cfg.work_dir, "build", "nginx-src-%s" % variant)
     if os.path.isdir(bdir):
@@ -155,7 +223,25 @@ def build_nginx(cfg, env, variant, force=False):
     return binary
 
 
+def stale_binaries(cfg):
+    """Built binaries older than the DPDK libraries (or libfstack) they link."""
+    dpdk = dpdk_libs_mtime(cfg)
+    if not dpdk:
+        return []
+    out = []
+    bins = [cfg.dperf_bin] + [os.path.join(cfg.fstack_tools, t) for t in TOOLS]
+    for p in bins:
+        if os.path.isfile(p) and older_than(p, dpdk):
+            out.append(p)
+    fst = max(dpdk, newest_mtime([os.path.join(cfg.fstack_dir, "lib", "libfstack.a")]))
+    for p in (cfg.nginx_fstack, cfg.nginx_kernel):
+        if p and os.path.isfile(p) and older_than(p, fst):
+            out.append(p)
+    return out
+
+
 def build_all(cfg, what, force=False):
+    update_dpdk(cfg)
     env = build_env(cfg)
     what = set(what)
     if "all" in what:

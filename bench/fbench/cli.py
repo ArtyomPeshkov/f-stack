@@ -120,6 +120,9 @@ def cmd_check(cfg, a):
         else:
             warn("  %-16s MISSING %s (run ./build.sh)" % (name, path))
             ok = False
+    for path in buildmod.stale_binaries(cfg):
+        warn("  %s is older than the DPDK/libfstack it links (run ./build.sh)" % path)
+        ok = False
     for st in nicmod.NicManager(m, cfg.fstack_dir, cfg.dpdk_build).status():
         info("  NIC %(pci)s driver=%(driver)s numa=%(numa)s netdev=%(netdev)s" % st)
     for w in hostmod.check_host(m):
@@ -270,6 +273,13 @@ def cmd_run(cfg, a):
         if not hello.get("client_version_ok"):
             warn("fbench version differs on the server (%s): update both checkouts" %
                  hello.get("version"))
+        stale = [("client", p) for p in buildmod.stale_binaries(cfg)] + \
+                [("server", p) for p in hello.get("stale", [])]
+        for role, path in stale:
+            # e.g. ff_top built against another DPDK crashes when it attaches to
+            # the F-Stack processes (DPDK multi-process needs the same build)
+            warn("%s: %s is older than the DPDK/libfstack it links: run ./build.sh there" %
+                 (role, path))
         server_info = agent.call("prepare", timeout=300)
         client_info = hostmod.host_info(cfg.client)
         client_info["hugepages"] = hp

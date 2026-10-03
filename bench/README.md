@@ -25,6 +25,7 @@ bench/
   run_all.sh           оба сценария подряд
   restore.sh           аварийная очистка: убить dperf/nginx, вернуть порты драйверу ядра
   fbench.py, fbench/   оркестратор (python3 >= 3.6, только stdlib)
+  patches/             исправление dperf (build.sh накладывает его сам)
 ```
 
 ## Схема стенда
@@ -67,12 +68,20 @@ bench/
    Оркестратор сверяет хеш общих секций и откажется работать с разными конфигами.
 
 3. **Сборка — на обеих машинах**: `./build.sh`
+   * если `dpdk_build` — meson build-dir, сначала инкрементально пересобирает DPDK
+     (`ninja -C dpdk_build`): в этой ветке исправлен bonding PMD в `f-stack/dpdk`, без
+     пересборки DPDK bond в F-Stack с несколькими воркерами работать не будет;
    * находит `libdpdk` в `dpdk_build` (`meson-uninstalled/` или `lib*/pkgconfig`) и собирает
-     dperf статически против **этого** DPDK (`dperf/build/dperf`);
+     dperf статически против **этого** DPDK (`dperf/build/dperf`); исходники dperf
+     автоматически исправляются (ошибка контрольной суммы inner TCP в VXLAN, см. ниже);
    * собирает `libfstack.a`, `f-stack/tools/sbin/{ifconfig,route,arp,top,...}`;
    * собирает nginx из `app/nginx-1.28.0` дважды: `work/install/nginx-fstack`
      (`--with-ff_module`) и `work/install/nginx-kernel` (без него: `NGX_HAVE_FSTACK` не
      определён, код F-Stack не используется — это обычный nginx той же версии).
+   Повторный `./build.sh` пересобирает только то, что старше DPDK/`libfstack.a`/исходников
+   `lib/`. Это важно: процессы F-Stack и утилиты `ff_*` — primary/secondary-процессы одного
+   DPDK, бинарники из разных сборок DPDK несовместимы (`ff_top` падает при подключении).
+   `check.sh` предупреждает об устаревших бинарниках.
    Готовые бинарники можно указать в `[paths]` (`dperf_bin`, `nginx_fstack`, `nginx_kernel`).
    `./build.sh --force` — пересобрать всё.
 
@@ -197,12 +206,14 @@ Gbps в отчёте — как считает dperf: L2-кадры без пр�
   closed-loop keep-alive с большим `cc`, payload 1400 (максимальный кадр без jumbo),
   число client IP рассчитывается под `cps × RTO` и бюджет hugepages;
 * bond: хеш L3+L4 (поток → слейв), LACP fast rate; dperf шлёт LLDP раз в 100 мс, чтобы
-  LACP в DPDK bond mode 4 не «засыпал»;
+  LACP в DPDK bond mode 4 не «засыпал»; F-Stack использует выделенные очереди LACP, если NIC
+  умеет rte_flow по ethertype, иначе (после исправления в этой ветке) сам выталкивает LACPDU
+  пустым `tx_burst` раз в 10 мс;
 * kernel: каналы = воркерам, IRQ/XPS 1:1, RPS off, irqbalance off, `reuseport`,
   `worker_cpu_affinity`, sendfile+tcp_nopush, open_file_cache, большие backlog/буферы,
   RSS по портам UDP (энтропия VXLAN в outer UDP src port);
-* F-Stack: TSO, `pkt_tx_delay=0`, `idle_sleep=0`, буферы TCP 256 KB, `allow` только нужных
-  портов, vip-адреса под FDIR клиента;
+* F-Stack: TSO (`fstack_tso`), `pkt_tx_delay=0`, `idle_sleep=0`, буферы TCP 256 KB, `allow`
+  только нужных портов, vip-адреса под FDIR клиента;
 * nginx: `access_log off`, `keepalive_requests 1e9`, `multi_accept`, `accept_mutex off`.
 
 ### Вручную (сильно влияет на результат)
@@ -247,6 +258,23 @@ Gbps в отчёте — как считает dperf: L2-кадры без пр�
   урезается автоматически (в логе будет предупреждение).
 * Числа dperf `httpErr/skErr/retransmit` попадают в флаг `errors` — смотрите их в
   `results.jsonl`/логах точки, если флаг стоит.
+* **FDIR на NIC клиента сильно предпочтителен.** В режиме `rss` (NIC без нужных rte_flow)
+  ответы могут приходить не на то ядро dperf, которое открыло соединение: растут
+  `tcpDrop/httpErr`, результаты шумнее и ниже реальных.
+* **F-Stack + VXLAN: один outer UDP source port.** F-Stack не передаёт RSS-хеш NIC во FreeBSD
+  (`m_pkthdr.flowid`), поэтому `vxlan(4)` берёт source port из хеша inner Ethernet-заголовка —
+  он одинаковый для всех потоков. Следствие для `bond + VXLAN`: весь исходящий VXLAN-трафик
+  F-Stack идёт через **один** слейв bond (хеш L3+L4 по outer-заголовку), а ядро Linux
+  раскладывает потоки по разным source port и слейвам. Для `bw` это заметно; входящий трафик
+  (от dperf) распределяется нормально.
+* MAC интерфейса `vxlan0` в F-Stack нельзя задать через `ff_ifconfig` (ошибка ioctl); он
+  детерминирован (hostuuid + имя интерфейса) и одинаков во всех процессах — стенд читает его
+  и передаёт dperf как inner dst MAC.
+* bond в F-Stack с несколькими воркерами: режимы 0–4 (в т.ч. 802.3ad); 5/6 (TLB/ALB) во
+  вторичных процессах DPDK не поддерживаются.
+* Не запускайте на сервере во время прогона другие DPDK-приложения с префиксом по
+  умолчанию (`rte`): новый primary-процесс удаляет hugepage-файлы F-Stack, и `ff_top`
+  (флаг `no-ff_top`) перестаёт подключаться.
 
 ## Диагностика
 * `waiting for the agent` — не запущен `agent.sh` на B, не тот `server_addr`/порт, фаервол.
@@ -254,11 +282,38 @@ Gbps в отчёте — как считает dperf: L2-кадры без пр�
 * `dperf server did not start` / `bad gateway` — нет связи по тестовым портам (кабель, IP,
   bond/LACP); логи dperf лежат в `points/<точка>/`, на B — в `work/agent/`.
 * `FDIR-UNSUPPORTED` — NIC не поддерживает нужные rte_flow; стенд сам перейдёт на `rss`.
+* `stalled` — трафик встал (нет ответов за окно). Для F-Stack `bw` чаще всего это TSO
+  конкретного NIC/драйвера: проверьте с `fstack_tso = 0` в `[scenario2]`.
+* `no-ff_top` — не удалось снять CPU F-Stack через `ff_top`: утилиты собраны против другого
+  DPDK (`./build.sh`), либо на машине работает другой DPDK primary с префиксом `rte`.
+* `F-Stack nginx did not come up` — смотрите `points/<точка>/nginx-error.log.tail`; для bond
+  `Invalid args in mode=…,slave=…` означает F-Stack без исправлений этой ветки.
 * hugepages не выделились на лету — резервируйте при загрузке (см. cmdline выше).
 * После аварии: `./restore.sh client` / `./restore.sh server`.
 
 ## Изменения в F-Stack
-`lib/ff_api.symlist`: добавлен экспорт `ff_mbuf_set_timestamp`. Без него текущая ветка
-F-Stack (после «Propagate DPDK mbuf RX timestamp…») не линкует ни одно приложение
-(`undefined reference to ff_mbuf_set_timestamp` при сборке nginx). `build.sh` также
-пересобирает старую `libfstack.a`, если видит эту ошибку.
+* `lib/ff_api.symlist`: добавлен экспорт `ff_mbuf_set_timestamp`. Без него текущая ветка
+  F-Stack (после «Propagate DPDK mbuf RX timestamp…») не линкует ни одно приложение
+  (`undefined reference to ff_mbuf_set_timestamp` при сборке nginx). `build.sh` также
+  пересобирает старую `libfstack.a`, если видит эту ошибку.
+* bond с встроенным DPDK 23.11 не работал вообще:
+  * `lib/ff_config.c`: DPDK 23.11 переименовал devarg bonding `slave` → `member` и отвергает
+    старый ключ (`Invalid args` при старте). F-Stack передаёт участников с ключом, который
+    понимает используемый DPDK; в `[bondN]` можно писать и `slave=`, и `member=`.
+  * `dpdk/drivers/net/bonding`: во вторичных процессах DPDK bonding PMD не настраивал
+    функции rx/tx («TODO: request info from primary»), поэтому каждый воркер F-Stack, кроме
+    первого, падал (SIGSEGV) на первом же `rx_burst`. Теперь вторичный процесс получает
+    функции rx/tx режима, выбранного primary (режимы 0–4); состояние LACP по портам (mode 4)
+    перенесено из локального массива процесса в memzone, общую для всех процессов; хеш
+    балансировки выбирается по политике, а не через указатель на функцию в общей памяти.
+  * `lib/ff_dpdk_if.c`: если NIC не может направить LACP-кадры в выделенную очередь, bond
+    mode 4 отправляет LACPDU только изнутри `rte_eth_tx_burst()`, а F-Stack вызывал его
+    только при наличии данных — LACP никогда не сходился. Теперь для портов bond mode 4
+    раз в 10 мс вызывается пустой `tx_burst`.
+
+## Изменения в dperf
+`patches/dperf-vxlan-inner-tcp-csum.patch` (накладывается `build.sh` автоматически): в
+VXLAN-режиме dperf пишет в заголовок `th_seq = snd_una`, а контрольную сумму inner TCP
+пересчитывает от `snd_nxt`. Сумма неверна у SYN/FIN и сегментов с данными, Linux и F-Stack
+их отбрасывают (`TcpInCsumErrors`), и сценарий 2 с VXLAN не работает совсем. В сценарии 1
+(dperf ↔ dperf) ошибка не видна: dperf не проверяет сумму inner TCP.
