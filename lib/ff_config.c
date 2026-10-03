@@ -33,6 +33,7 @@
 #include <arpa/inet.h>
 #include <rte_config.h>
 #include <rte_string_fns.h>
+#include <rte_version.h>
 
 #include "ff_config.h"
 #include "ff_ini_parser.h"
@@ -836,7 +837,7 @@ bond_cfg_handler(struct ff_config *cfg, const char *section,
 
     if (strcmp(name, "mode") == 0) {
         cur->mode = atoi(value);
-    } else if (strcmp(name, "slave") == 0) {
+    } else if (strcmp(name, "slave") == 0 || strcmp(name, "member") == 0) {
         cur->slave = strdup(value);
     } else if (strcmp(name, "primary") == 0) {
         cur->primary = strdup(value);
@@ -1043,6 +1044,52 @@ ini_parse_handler(void* user, const char* section, const char* name,
     return 1;
 }
 
+/*
+ * DPDK 23.11 renamed the bonding devarg "slave" to "member" and the
+ * bonding PMD rejects the old key, so every member is passed with the key
+ * of the DPDK in use. The list is configured as "pci0,slave=pci1,..."
+ * ("member=" is accepted as well); other devargs are passed through.
+ */
+#if RTE_VERSION >= RTE_VERSION_NUM(23, 11, 0, 0)
+#define FF_BOND_MEMBER_KVARG "member"
+#else
+#define FF_BOND_MEMBER_KVARG "slave"
+#endif
+
+static int
+bond_members_append(char *buf, size_t size, const char *members)
+{
+    char *dup, *tok, *saveptr = NULL;
+    size_t len = strlen(buf);
+    int n, ret = 0;
+
+    dup = strdup(members);
+    if (dup == NULL) {
+        return -1;
+    }
+
+    for (tok = strtok_r(dup, ",", &saveptr); tok != NULL;
+        tok = strtok_r(NULL, ",", &saveptr)) {
+        if (strncmp(tok, "slave=", 6) == 0) {
+            n = snprintf(buf + len, size - len, ",%s=%s", FF_BOND_MEMBER_KVARG, tok + 6);
+        } else if (strncmp(tok, "member=", 7) == 0) {
+            n = snprintf(buf + len, size - len, ",%s=%s", FF_BOND_MEMBER_KVARG, tok + 7);
+        } else if (strchr(tok, '=') != NULL) {
+            n = snprintf(buf + len, size - len, ",%s", tok);
+        } else {
+            n = snprintf(buf + len, size - len, ",%s=%s", FF_BOND_MEMBER_KVARG, tok);
+        }
+        if (n < 0 || (size_t)n >= size - len) {
+            ret = -1;
+            break;
+        }
+        len += n;
+    }
+
+    free(dup);
+    return ret;
+}
+
 static int
 dpdk_args_setup(struct ff_config *cfg)
 {
@@ -1130,10 +1177,18 @@ dpdk_args_setup(struct ff_config *cfg)
         for (i=0; i<cfg->dpdk.nb_bond; i++) {
             sprintf(temp, "--vdev");
             dpdk_argv[n++] = strdup(temp);
-            sprintf(temp, "net_bonding%d,mode=%d,slave=%s",
+            sprintf(temp, "net_bonding%d,mode=%d",
                 cfg->dpdk.bond_cfgs[i].bond_id,
-                cfg->dpdk.bond_cfgs[i].mode,
-                cfg->dpdk.bond_cfgs[i].slave);
+                cfg->dpdk.bond_cfgs[i].mode);
+
+                if (cfg->dpdk.bond_cfgs[i].slave &&
+                    bond_members_append(temp, sizeof(temp),
+                        cfg->dpdk.bond_cfgs[i].slave) < 0) {
+                    fprintf(stderr, "bond%d: cannot pass the slave list: %s\n",
+                        cfg->dpdk.bond_cfgs[i].bond_id,
+                        cfg->dpdk.bond_cfgs[i].slave);
+                    return -1;
+                }
 
                 if (cfg->dpdk.bond_cfgs[i].primary) {
                     sprintf(temp2, ",primary=%s",

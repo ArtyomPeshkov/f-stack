@@ -8,6 +8,7 @@
 
 #include <rte_alarm.h>
 #include <rte_malloc.h>
+#include <rte_memzone.h>
 #include <rte_errno.h>
 #include <rte_cycles.h>
 
@@ -129,7 +130,40 @@ static const struct rte_ether_addr lacp_mac_addr = {
 	.addr_bytes = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x02 }
 };
 
-struct port bond_mode_8023ad_ports[RTE_MAX_ETHPORTS];
+/*
+ * F-Stack: the per member mode 4 state is kept in a memzone rather than in a
+ * process local array, so that secondary processes polling the bonding
+ * device see the LACP state and the slow packet rings of the primary one.
+ */
+#define BOND_MODE_8023AD_PORTS_MZ "bond_mode_8023ad_ports"
+
+struct port *bond_mode_8023ad_ports;
+
+int
+bond_mode_8023ad_ports_init(void)
+{
+	const struct rte_memzone *mz;
+	const size_t size = sizeof(struct port) * RTE_MAX_ETHPORTS;
+
+	if (bond_mode_8023ad_ports != NULL)
+		return 0;
+
+	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+		mz = rte_memzone_reserve(BOND_MODE_8023AD_PORTS_MZ, size,
+				SOCKET_ID_ANY, 0);
+		if (mz != NULL)
+			memset(mz->addr, 0, size);
+		else if (rte_errno == EEXIST)
+			mz = rte_memzone_lookup(BOND_MODE_8023AD_PORTS_MZ);
+	} else {
+		mz = rte_memzone_lookup(BOND_MODE_8023AD_PORTS_MZ);
+	}
+	if (mz == NULL)
+		return -1;
+
+	bond_mode_8023ad_ports = mz->addr;
+	return 0;
+}
 
 static void
 timer_cancel(uint64_t *timer)

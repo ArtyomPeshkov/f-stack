@@ -2301,6 +2301,22 @@ main_loop(void *arg)
 
     qconf = &lcore_conf;
 
+    /*
+     * Unless the NIC steers LACP frames to dedicated queues, a mode 4 bond
+     * sends the LACPDUs of its state machines from rte_eth_tx_burst() only,
+     * so flush them with an empty burst every 10ms (it must be < 100ms),
+     * otherwise LACP never converges while there is nothing else to send.
+     */
+    uint16_t lacp_ports[RTE_MAX_ETHPORTS], nb_lacp_ports = 0;
+    uint64_t lacp_tsc = 0, lacp_flush_tsc = rte_get_tsc_hz() / 100;
+    for (i = 0; i < qconf->nb_tx_port; i++) {
+        port_id = qconf->tx_port_id[i];
+        if (ff_global_cfg.dpdk.port_cfgs[port_id].nb_slaves > 0 &&
+            rte_eth_bond_mode_get(port_id) == BONDING_MODE_8023AD) {
+            lacp_ports[nb_lacp_ports++] = port_id;
+        }
+    }
+
     while (1) {
 
         if (unlikely(stop_loop)) {
@@ -2364,6 +2380,15 @@ main_loop(void *arg)
             }
 
             prev_tsc = cur_tsc;
+        }
+
+        if (unlikely(nb_lacp_ports && cur_tsc - lacp_tsc >= lacp_flush_tsc)) {
+            for (i = 0; i < nb_lacp_ports; i++) {
+                port_id = lacp_ports[i];
+                rte_eth_tx_burst(port_id, qconf->tx_queue_id[port_id],
+                    (struct rte_mbuf **)qconf->tx_mbufs[port_id].m_table, 0);
+            }
+            lacp_tsc = cur_tsc;
         }
 
         /*

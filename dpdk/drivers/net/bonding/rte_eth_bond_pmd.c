@@ -1154,6 +1154,30 @@ bond_ethdev_tx_burst_alb(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 	return num_tx_total;
 }
 
+/*
+ * F-Stack: the hash is picked by policy rather than called through
+ * internals->burst_xmit_hash, because the private data is shared with
+ * secondary processes where that address is not valid if the binary is
+ * mapped elsewhere.
+ */
+static inline void
+bond_burst_xmit_hash(struct bond_dev_private *internals,
+		struct rte_mbuf **bufs, uint16_t nb_bufs, uint16_t member_count,
+		uint16_t *members)
+{
+	switch (internals->balance_xmit_policy) {
+	case BALANCE_XMIT_POLICY_LAYER23:
+		burst_xmit_l23_hash(bufs, nb_bufs, member_count, members);
+		break;
+	case BALANCE_XMIT_POLICY_LAYER34:
+		burst_xmit_l34_hash(bufs, nb_bufs, member_count, members);
+		break;
+	default:
+		burst_xmit_l2_hash(bufs, nb_bufs, member_count, members);
+		break;
+	}
+}
+
 static inline uint16_t
 tx_burst_balance(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs,
 		 uint16_t *member_port_ids, uint16_t member_count)
@@ -1177,7 +1201,7 @@ tx_burst_balance(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs,
 	 * Populate members mbuf with the packets which are to be sent on it
 	 * selecting output member using hash based on xmit policy
 	 */
-	internals->burst_xmit_hash(bufs, nb_bufs, member_count,
+	bond_burst_xmit_hash(internals, bufs, nb_bufs, member_count,
 			bufs_member_port_idxs);
 
 	for (i = 0; i < nb_bufs; i++) {
@@ -1590,6 +1614,55 @@ mac_address_members_update(struct rte_eth_dev *bonding_eth_dev)
 		}
 		if (!set)
 			return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * F-Stack: Rx/Tx burst functions of a bonding device attached by a secondary
+ * process, for the mode set up by the primary one. The private data and the
+ * mode 4 state are shared, while the control path (link status, LACP state
+ * machines) keeps running in the primary process only.
+ */
+static int
+bond_ethdev_secondary_burst_set(struct rte_eth_dev *eth_dev)
+{
+	struct bond_dev_private *internals = eth_dev->data->dev_private;
+
+	switch (internals->mode) {
+	case BONDING_MODE_ROUND_ROBIN:
+		eth_dev->tx_pkt_burst = bond_ethdev_tx_burst_round_robin;
+		eth_dev->rx_pkt_burst = bond_ethdev_rx_burst;
+		break;
+	case BONDING_MODE_ACTIVE_BACKUP:
+		eth_dev->tx_pkt_burst = bond_ethdev_tx_burst_active_backup;
+		eth_dev->rx_pkt_burst = bond_ethdev_rx_burst_active_backup;
+		break;
+	case BONDING_MODE_BALANCE:
+		eth_dev->tx_pkt_burst = bond_ethdev_tx_burst_balance;
+		eth_dev->rx_pkt_burst = bond_ethdev_rx_burst;
+		break;
+	case BONDING_MODE_BROADCAST:
+		eth_dev->tx_pkt_burst = bond_ethdev_tx_burst_broadcast;
+		eth_dev->rx_pkt_burst = bond_ethdev_rx_burst;
+		break;
+	case BONDING_MODE_8023AD:
+		if (bond_mode_8023ad_ports_init() != 0)
+			return -1;
+		if (internals->mode4.dedicated_queues.enabled == 0) {
+			eth_dev->rx_pkt_burst = bond_ethdev_rx_burst_8023ad;
+			eth_dev->tx_pkt_burst = bond_ethdev_tx_burst_8023ad;
+		} else {
+			eth_dev->rx_pkt_burst =
+					bond_ethdev_rx_burst_8023ad_fast_queue;
+			eth_dev->tx_pkt_burst =
+					bond_ethdev_tx_burst_8023ad_fast_queue;
+		}
+		break;
+	default:
+		/* TLB and ALB keep part of their state in the primary process */
+		return -1;
 	}
 
 	return 0;
@@ -3791,11 +3864,21 @@ bond_probe(struct rte_vdev_device *dev)
 			RTE_BOND_LOG(ERR, "Failed to probe %s", name);
 			return -1;
 		}
-		/* TODO: request info from primary to set up Rx and Tx */
 		eth_dev->dev_ops = &default_dev_ops;
 		eth_dev->device = &dev->device;
+		if (bond_ethdev_secondary_burst_set(eth_dev) != 0)
+			RTE_BOND_LOG(WARNING,
+				"%s: Rx/Tx in a secondary process is not supported in mode %u",
+				name, ((struct bond_dev_private *)
+					eth_dev->data->dev_private)->mode);
 		rte_eth_dev_probing_finish(eth_dev);
 		return 0;
+	}
+
+	if (bond_mode_8023ad_ports_init() != 0) {
+		RTE_BOND_LOG(ERR, "Failed to allocate mode 4 port state for %s",
+			name);
+		return -1;
 	}
 
 	kvlist = rte_kvargs_parse(rte_vdev_device_args(dev),
