@@ -1070,6 +1070,12 @@ bond_members_append(char *buf, size_t size, const char *members)
 
     for (tok = strtok_r(dup, ",", &saveptr); tok != NULL;
         tok = strtok_r(NULL, ",", &saveptr)) {
+        while (*tok == ' ' || *tok == '\t') {
+            tok++;
+        }
+        if (*tok == '\0') {
+            continue;
+        }
         if (strncmp(tok, "slave=", 6) == 0) {
             n = snprintf(buf + len, size - len, ",%s=%s", FF_BOND_MEMBER_KVARG, tok + 6);
         } else if (strncmp(tok, "member=", 7) == 0) {
