@@ -1,0 +1,140 @@
+; =============================================================================
+; fbench: стенд производительности dperf / F-Stack / nginx.
+;
+; ОДИН И ТОТ ЖЕ файл кладётся на обе машины (cp bench.conf.example bench.conf):
+;   [client] - машина A: генератор нагрузки (dperf client) + оркестратор
+;   [server] - машина B: dperf server (сценарий 1) / nginx (сценарий 2) + агент
+; Относительные пути считаются от каталога этого файла (f-stack/bench).
+; Комментарий в строке значения начинается с " ;" (пробел перед ;).
+; =============================================================================
+
+[paths]
+; рядом лежат <root>/f-stack и <root>/dperf
+fstack_dir   = ..
+dperf_dir    = ../../dperf
+; DPDK, собранный из f-stack/dpdk: meson build-dir или install-prefix
+dpdk_build   = ../build/dpdk-build
+; пусто = собрать ./build.sh (dperf -> dperf/build/dperf, nginx -> work/install/nginx-*)
+dperf_bin    =
+nginx_fstack =
+nginx_kernel =
+; пусто = f-stack/tools/sbin
+fstack_tools =
+work_dir     = ./work
+results_dir  = ./results
+
+[control]
+; адрес МАШИНЫ B в management-сети (НЕ тестовые порты!) - там слушает агент
+server_addr  = 192.168.1.2
+port         = 9777
+; общий секрет агента; поменяйте
+token        = change-me
+; опционально: автозапуск агента по ssh (ключи без пароля), например root@192.168.1.2
+ssh          =
+; каталог f-stack/bench на сервере (для ssh); пусто = тот же путь, что и здесь
+remote_dir   =
+
+[client]
+; PCI-адреса тестовых портов: 1-й - для single, 1-й+2-й - для bond/dual
+pci          = 0000:3b:00.0 0000:3b:00.1
+; имена интерфейсов ядра (необязательно, определяются через sysfs)
+ifname       =
+; ядра под DPDK (до 12), лучше на NUMA-ноде NIC, без ядра 0 и без HT-соседей
+cores        = 2-13
+hugepages_gb = 8
+; vfio-pci | igb_uio | uio_pci_generic | none (none = не перепривязывать, Mellanox mlx5)
+dpdk_driver  = vfio-pci
+; драйвер ядра для возврата портов (auto = определить)
+kernel_driver = auto
+
+[server]
+pci          = 0000:af:00.0 0000:af:00.1
+ifname       =
+cores        = 2-13
+hugepages_gb = 8
+dpdk_driver  = vfio-pci
+kernel_driver = auto
+
+[network]
+; адресация тестовой сети; менять нужно только при пересечении с вашими сетями
+server_ip    = 10.200.0.1
+client_ip    = 10.200.0.2
+; 2-й порт в топологии dual
+server_ip2   = 10.201.0.1
+client_ip2   = 10.201.0.2
+prefix       = 16
+; диапазоны source-IP клиента dperf (по одному /16 на порт); младшие 2 байта
+; диапазонов не должны пересекаться (dperf индексирует сокеты по ним)
+client_range = 10.210.0.1
+client_range2 = 10.211.128.1
+; server-IP для FDIR: по одному адресу на ядро клиента (сервер принимает весь /24)
+server_range = 10.220.0.1
+server_range2 = 10.221.0.1
+; VXLAN: VNI (2-й порт dual = vni+1), внутренние адреса и MAC
+vni          = 100
+inner_server_ip = 10.230.0.1
+inner_server_ip2 = 10.231.0.1
+server_inner_mac = 02:fb:00:00:00:01
+client_inner_mac = 02:fb:00:00:00:02
+; bond: 4 = 802.3ad (LACP), 2 = balance-xor (без LACP); хеш l34 = L3+L4
+bond_mode    = 4
+bond_xmit_policy = l34
+
+[run]
+; single = 1 порт, bond = 2 порта в bond, dual = 2 независимых порта
+topologies   = single bond
+vxlan        = off on
+; секунд стационарной фазы на точку, разгон (slow_start dperf), пропуск начала
+duration     = 30
+ramp         = 10
+settle       = 5
+cooldown     = 3
+; "оптимум" = минимум ядер, дающий >= (100 - N)% от максимума кривой
+optimum_tolerance = 5
+; вернуть порты драйверу ядра после прогона
+restore_bindings = yes
+
+[scenario1]
+; dperf <-> dperf
+; tps = TCP keep-alive 1400B запрос/ответ (Gbps в обе стороны)
+; pps = UDP 64B flood (Mpps)  cps = короткие TCP-соединения  bw = большие ответы
+tests        = tps pps cps
+; ядер на сторону (sweep для поиска оптимума)
+cores        = 1 2 4 6 8 12
+; off | on | "off on" - jumbo MTU 9000 (только tps/bw; dperf: ~750MB hugepages на ядро)
+jumbo        = off
+tps_payload  = 1400
+tps_cc_per_core = 4000
+pps_payload  = 18
+pps_cc_per_core = 20000
+; целевой CPS на ядро (ограничивается бюджетом hugepages); поиск максимума - 2 прохода
+cps_per_core = 2m
+cps_ramp     = 30
+bw_payload   = 64k
+bw_cc_per_core = 256
+
+[scenario2]
+; dperf -> nginx: ядро Linux против F-Stack
+stacks       = kernel fstack
+; rps = keep-alive маленький ответ, cps = короткие соединения, bw = большой файл
+tests        = rps cps bw
+; число воркеров nginx (= ядер сервера) - sweep для поиска оптимума
+workers      = 1 2 4 6 8 12
+; ядер dperf-клиента (для VXLAN всегда 1 на порт, см. README)
+client_cores = 12
+; тело маленького ответа (return 200 "...", как в методике F-Stack), <= 3500
+small_body   = 600
+; размер(ы) файла для bw, например: 64k 1m
+bw_size      = 1m
+rps_cc_per_worker = 2000
+bw_cc_per_worker  = 128
+cps_per_worker    = 300k
+cps_ramp     = 30
+; тюнинг F-Stack
+fstack_tso   = 1
+fstack_pkt_tx_delay = 0
+fstack_sendspace = 262144
+fstack_recvspace = 262144
+; тюнинг kernel nginx
+kernel_sendfile = on
+nginx_output_buffers = 2 128k

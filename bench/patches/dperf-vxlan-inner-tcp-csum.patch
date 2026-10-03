@@ -1,0 +1,20 @@
+dperf: fix the inner TCP checksum of VXLAN-encapsulated packets
+
+tcp_new_packet() writes th_seq = snd_una, but the incremental update of the
+precomputed inner checksum used snd_nxt. For SYN/FIN (snd_nxt = snd_una + 1)
+and for data segments (snd_nxt = snd_una + len) the checksum is wrong, so a
+real TCP stack behind a VXLAN endpoint (Linux, F-Stack) drops every such
+segment (TcpInCsumErrors). dperf <-> dperf does not notice: dperf does not
+verify checksums. fbench/build.sh applies this change automatically.
+
+--- a/src/tcp.c
++++ b/src/tcp.c
+@@ -143,7 +143,7 @@ static inline struct rte_mbuf *tcp_new_packet(struct work_space *ws, struct socket *sk, uint8_t tcp_flags)
+             iph->check = csum_update_u16(csum_ip, 0, htons(ws->ip_id));
+         }
+ 
+-        csum_tcp = csum_update_u32(csum_tcp, htonl(sk->snd_nxt), htonl(sk->rcv_nxt));
++        csum_tcp = csum_update_u32(csum_tcp, htonl(sk->snd_una), htonl(sk->rcv_nxt));
+         csum_tcp = csum_update_u16(csum_tcp, 0, htons(tcp_flags));
+     } else {
+         iph = mbuf_ip_hdr(m);
