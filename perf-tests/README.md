@@ -269,12 +269,18 @@ nginx на F-Stack поднимается дольше: DPDK инициализ�
 На шаге fstack дайте серверу 10–15 с, прежде чем нажимать Enter на клиенте. Если между точками сервер
 не успевает перезапустить nginx, увеличьте `S2_PAUSE`.
 
-Отдельный шаг или свой набор точек задаётся переменными, **одинаково на обеих машинах**:
+Отдельный стек или свой набор точек задаётся переменными, **одинаково на обеих машинах**.
+С одним стеком шаг один: Enter на сервере, затем на клиенте.
 
 ```
-S2_STACKS=fstack S2_CORES="1 2" S2_SIZES="64k:1000" ./s2_nginx.sh server
-S2_STACKS=fstack S2_CORES="1 2" S2_SIZES="64k:1000" ./s2_nginx.sh client
+только ядро:     B: sudo S2_STACKS=kernel ./s2_nginx.sh server    A: S2_STACKS=kernel ./s2_nginx.sh client
+только F-Stack:  B: sudo S2_STACKS=fstack ./s2_nginx.sh server    A: S2_STACKS=fstack ./s2_nginx.sh client
+свои точки:      B: sudo S2_STACKS=fstack S2_CORES="1 2" S2_SIZES="64k:1000" ./s2_nginx.sh server
+                 A: S2_STACKS=fstack S2_CORES="1 2" S2_SIZES="64k:1000" ./s2_nginx.sh client
 ```
+
+С sudo переменные пишутся после `sudo`: в варианте `S2_STACKS=kernel sudo ./s2_nginx.sh` sudo их
+не передаст. Под root sudo не нужен.
 
 Где лежат логи:
 - клиент: `results/s2-<дата>-client/<стек>/nNN-<размер>.conf` и `.log`;
@@ -290,6 +296,13 @@ S2_STACKS=fstack S2_CORES="1 2" S2_SIZES="64k:1000" ./s2_nginx.sh client
 ```
 scp -r B:<...>/perf-tests/results/s2-<дата>-server results/
 ./parse_dperf.py results/s2-<дата>-client results/s2-<дата>-server [--csv s2.csv]
+```
+
+Если kernel и F-Stack запускались отдельно, передайте парсеру обе сессии клиента (и сервера):
+сравнение строится по ним вместе, а если точка повторялась, берётся более поздний прогон.
+
+```
+./parse_dperf.py results/s2-<дата1>-client results/s2-<дата2>-client results/s2-<дата1>-server results/s2-<дата2>-server
 ```
 
 ```

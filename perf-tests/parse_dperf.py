@@ -209,21 +209,34 @@ def print_group(key, rows, pick, top):
 
 
 def print_compare(rows):
-    """Сценарий 2: kernel против F-Stack при одном и том же размере ответа и числе воркеров nginx."""
-    for session in sorted({r['session'] for r in rows if r['size']}):
-        by = {(r['size'], r['cores'], r['step']): r for r in rows if r['session'] == session and r['size']}
-        if not {'kernel', 'fstack'} <= {k[2] for k in by}:
-            continue
-        print('\n== kernel против F-Stack: %s' % session)
-        print('%6s %6s %10s %10s %9s %9s %9s %8s %8s' % (
-            'size', 'cores', 'kern_Gbps', 'kern_Krps', 'kern_cpu', 'ff_Gbps', 'ff_Krps', 'ff_cpu', 'ff/kern'))
-        for size, cores in sorted({k[:2] for k in by}, key=lambda k: (size_bytes(k[0]), k[1])):
-            k, f = by.get((size, cores, 'kernel')), by.get((size, cores, 'fstack'))
-            cols = []
-            for r in (k, f):
-                cols += ['%.1f' % r['gbps_rx'], '%.1f' % r['krps'], pct(r['cpu_srv'])] if r else ['-'] * 3
-            ratio = '%.2fx' % (f['krps'] / k['krps']) if k and f and k['krps'] and f['krps'] else '-'
-            print('%6s %6d %10s %10s %9s %9s %9s %8s %8s' % tuple([size, cores] + cols + [ratio]))
+    """Сценарий 2: kernel против F-Stack при одном и том же размере ответа и числе воркеров nginx.
+    Сессия с обоими стеками сравнивается сама с собой. Сессии с одним стеком (S2_STACKS=kernel
+    и S2_STACKS=fstack запускали отдельно) — между собой; при повторах точки берётся более поздняя."""
+    rows = sorted((r for r in rows if r['size']), key=lambda r: r['session'])
+    stacks = {}
+    for r in rows:
+        stacks.setdefault(r['session'], set()).add(r['step'])
+    single = [x for x in stacks if not {'kernel', 'fstack'} <= stacks[x]]
+    for session in stacks:
+        if session not in single:
+            compare_table(session, [r for r in rows if r['session'] == session])
+    compare_table(' + '.join(single), [r for r in rows if r['session'] in single])
+
+
+def compare_table(title, rows):
+    by = {(r['size'], r['cores'], r['step']): r for r in rows}
+    if not {'kernel', 'fstack'} <= {k[2] for k in by}:
+        return
+    print('\n== kernel против F-Stack: %s' % title)
+    print('%6s %6s %10s %10s %9s %9s %9s %8s %8s' % (
+        'size', 'cores', 'kern_Gbps', 'kern_Krps', 'kern_cpu', 'ff_Gbps', 'ff_Krps', 'ff_cpu', 'ff/kern'))
+    for size, cores in sorted({k[:2] for k in by}, key=lambda k: (size_bytes(k[0]), k[1])):
+        k, f = by.get((size, cores, 'kernel')), by.get((size, cores, 'fstack'))
+        cols = []
+        for r in (k, f):
+            cols += ['%.1f' % r['gbps_rx'], '%.1f' % r['krps'], pct(r['cpu_srv'])] if r else ['-'] * 3
+        ratio = '%.2fx' % (f['krps'] / k['krps']) if k and f and k['krps'] and f['krps'] else '-'
+        print('%6s %6d %10s %10s %9s %9s %9s %8s %8s' % tuple([size, cores] + cols + [ratio]))
 
 
 def main():
