@@ -2,10 +2,11 @@
 # Сценарий 1: dperf <-> dperf, максимальная пропускная способность и оптимум по ядрам.
 #   машина B:  ./s1_dperf.sh server
 #   машина A:  ./s1_dperf.sh client
-# Шаг = (bond, vxlan). На шаг сервер поднимается с max(S1_CORES) воркерами, а клиент
-# сам перебирает число воркеров N из S1_CORES. Воркер i клиента работает с воркером i
-# сервера (FDIR по IP сервера, с VXLAN — по VTEP), так что каждая точка — это N:N.
-# Порядок: Enter на сервере (запуск шага) -> Enter на клиенте -> ... (по шагу за раз).
+# Шаг = (bond, vxlan). Внутри шага обе стороны перебирают число воркеров N из S1_CORES:
+# клиент запускает точки подряд с паузой S1_PAUSE, сервер поднимается ровно с N воркерами
+# и перезапускается со следующим N, когда трафик клиента пропадает. Воркер i клиента
+# работает с воркером i сервера (FDIR по IP сервера, с VXLAN — по VTEP): каждая точка — N:N.
+# Порядок: Enter на сервере -> Enter на клиенте, по одному разу на шаг.
 set -u
 cd "$(dirname "$0")"
 . ./env.sh
@@ -19,7 +20,7 @@ esac
 
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
 NMAX=$(printf '%s\n' $S1_CORES | sort -n | tail -n1)
-for c in python3 stdbuf pkill; do command -v $c >/dev/null || die "нет $c"; done
+for c in python3 stdbuf pkill pgrep; do command -v $c >/dev/null || die "нет $c"; done
 [ -x "$DPERF" ] || die "нет $DPERF — соберите: ./build_dperf.sh"
 [ "$(echo $CPUS | wc -w)" -ge "$NMAX" ] || die "в списке ядер ($CPUS) меньше $NMAX"
 pcis=$PCI0
@@ -98,6 +99,21 @@ stop_server() {
     wait
 }
 
+# Сервер ждёт конца прогона клиента: трафик был и упал ниже 1 Gbps на 3 с подряд.
+# Если трафика нет 5 минут (клиент не стартовал), сервер переходит к следующей точке.
+wait_client_run() {   # <лог сервера>
+    local seen=0 idle=0 t=0 rx
+    while [ "$idle" -lt 3 ] && [ "$t" -lt 300 ]; do
+        sleep 1
+        pgrep -x dperf >/dev/null || { echo "[server] dperf завершился — см. $1"; return; }
+        rx=$(tail -n 30 "$1" | awk '$2 == "pktRx" {v = $7} END {gsub(",", "", v); printf "%d", v / 1e9}')
+        if [ "${rx:-0}" -ge 1 ]; then seen=1 idle=0
+        elif [ "$seen" = 1 ]; then idle=$((idle + 1))
+        else t=$((t + 1)); fi
+    done
+    [ "$seen" = 1 ] || echo "[server] 5 минут без трафика от клиента — перехожу к следующей точке"
+}
+
 SESSION=$RESULTS/s1-$(date +%Y%m%d-%H%M%S)-$role
 mkdir -p "$SESSION" && cp env.sh "$SESSION/"
 steps=()
@@ -106,22 +122,22 @@ total=${#steps[@]}
 
 if [ "$role" = server ]; then
     trap 'stop_server; exit 130' INT TERM
-    read -r -p "[server] шаг 1/$total (bond${steps[0]% *}-vxlan${steps[0]#* }): Enter — запустить "
     for i in "${!steps[@]}"; do
         set -- ${steps[$i]}
         dir=$SESSION/bond$1-vxlan$2
         mkdir -p "$dir"
-        gen_conf "$1" "$2" "$NMAX" > "$dir/server.conf"
-        meta "$1" "$2" "$NMAX" > "$dir/server.log"
-        run_dperf "$dir/server.conf" "$dir/server.log" "[srv bond$1-vxlan$2]" &
-        if [ $((i + 1)) -lt "$total" ]; then
-            next="остановить и запустить шаг $((i + 2))/$total (bond${steps[$((i + 1))]% *}-vxlan${steps[$((i + 1))]#* })"
-        else
-            next="остановить и завершить"
-        fi
-        echo "[server] шаг $((i + 1))/$total bond$1-vxlan$2 запущен (воркеров: $NMAX). Когда клиент закончит шаг, Enter — $next"
-        read -r
-        stop_server
+        read -r -p "[server] шаг $((i + 1))/$total bond$1-vxlan$2: Enter — запустить "
+        # на каждую точку ровно N воркеров: простаивающие воркеры dperf тоже крутят опрос
+        # на 100% и отнимают ядра (HT, планировщик хоста) у активных
+        for n in $S1_CORES; do
+            base=$dir/n$(printf %02d "$n")
+            gen_conf "$1" "$2" "$n" > "$base.conf"
+            meta "$1" "$2" "$n" > "$base.log"
+            echo "[server] bond$1-vxlan$2, воркеров: $n — жду прогона клиента"
+            run_dperf "$base.conf" "$base.log" "[srv n=$n]" &
+            wait_client_run "$base.log"
+            stop_server
+        done
     done
 else
     for i in "${!steps[@]}"; do
