@@ -23,6 +23,17 @@ fi
 pkg-config --exists libdpdk || { echo "DPDK не найден: задайте DPDK_BUILD в env.sh"; exit 1; }
 echo "DPDK $(pkg-config --modversion libdpdk): $(pkg-config --variable=pcfiledir libdpdk)"
 
+# Необязательной библиотеки pdump в сборке DPDK под f-stack может не быть:
+# тогда dperf собирается с заглушкой (теряется только захват пакетов через dpdk-pdump)
+pdump=
+for d in $(pkg-config --cflags-only-I libdpdk); do
+    if [ -e "${d#-I}/rte_pdump.h" ]; then pdump=1; fi
+done
+if [ -z "$pdump" ]; then
+    echo "В DPDK нет библиотеки pdump: dperf собирается с заглушкой compat/pdump"
+    export CFLAGS="${CFLAGS:-} -I$PT_DIR/compat/pdump"
+fi
+
 # RTE_SDK переключает Makefile dperf на сборку под старый DPDK (до 20.11)
 unset RTE_SDK RTE_TARGET
 rm -rf "$DPERF_DIR/build"
