@@ -27,7 +27,7 @@ SERVER_MAC=        # MAC серверного PCI0 (нужен клиенту)
 # --- ядра под DPDK: до 12, на NUMA-узле сетевой карты, без HT-соседей ---
 CLIENT_CPUS="1 2 3 4 5 6 7 8 9 10 11 12"
 SERVER_CPUS="1 2 3 4 5 6 7 8 9 10 11 12"
-HUGEPAGES_GB=8      # для host_tune.sh
+HUGEPAGES_GB=8      # для host_tune.sh; dperf без jumbo на 12 воркеров хватает 4
 
 # --- адреса: прямое соединение, одна L2-сеть ---
 CLIENT_IP=10.0.0.1      # IP клиента; с VXLAN — первый VTEP (по VTEP на воркер: .1, .2, ...)

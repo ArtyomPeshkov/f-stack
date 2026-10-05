@@ -17,18 +17,24 @@ esac
 node=$(cat "/sys/bus/pci/devices/${pcis%% *}/numa_node")
 [ "$node" -ge 0 ] || node=0
 
-# 1. hugepages на узле NIC: 1G-страницы (иначе 2M)
+# 1. hugepages на узле NIC: 1G-страницы; если столько не набралось — 2M
 hp=/sys/devices/system/node/node$node/hugepages
+got=0
 if [ -d $hp/hugepages-1048576kB ]; then
     echo "$HUGEPAGES_GB" > $hp/hugepages-1048576kB/nr_hugepages
-    mkdir -p /mnt/huge-1G
-    mountpoint -q /mnt/huge-1G || mount -t hugetlbfs -o pagesize=1G nodev /mnt/huge-1G
-    echo "hugepages 1G на node$node: $(cat $hp/hugepages-1048576kB/nr_hugepages) из $HUGEPAGES_GB"
-else
-    echo $((HUGEPAGES_GB * 512)) > $hp/hugepages-2048kB/nr_hugepages
-    mountpoint -q /dev/hugepages || mount -t hugetlbfs nodev /dev/hugepages
-    echo "hugepages 2M на node$node: $(cat $hp/hugepages-2048kB/nr_hugepages)"
+    got=$(cat $hp/hugepages-1048576kB/nr_hugepages)
 fi
+if [ "$got" -ge "$HUGEPAGES_GB" ]; then
+    size=1G
+else
+    [ -d $hp/hugepages-1048576kB ] && echo 0 > $hp/hugepages-1048576kB/nr_hugepages
+    echo $((HUGEPAGES_GB * 512)) > $hp/hugepages-2048kB/nr_hugepages
+    got=$(($(cat $hp/hugepages-2048kB/nr_hugepages) / 512))
+    size=2M
+fi
+mkdir -p /mnt/huge-$size
+mountpoint -q /mnt/huge-$size || mount -t hugetlbfs -o pagesize=$size nodev /mnt/huge-$size
+echo "hugepages на node$node: $got ГБ страницами $size (нужно $HUGEPAGES_GB ГБ)"
 
 # 2. максимальная частота CPU
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
