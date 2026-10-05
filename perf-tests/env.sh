@@ -1,6 +1,6 @@
 # Параметры стенда. Один и тот же файл на обеих машинах:
 #   машина A — dperf client, машина B — dperf server.
-# Переменные плана (S1_*, JUMBO) можно переопределить из командной строки:
+# Переменные плана (S1_*, S2_*, JUMBO) можно переопределить из командной строки:
 #   S1_BOND=1 S1_VXLAN=0 S1_CORES="2 4" ./s1_dperf.sh client
 
 # --- пути: рядом лежат f-stack/ (здесь perf-tests/) и dperf/ ---
@@ -50,3 +50,17 @@ S1_DURATION=${S1_DURATION:-30}            # секунд замера на то�
 S1_CC_PER_CORE=${S1_CC_PER_CORE:-2000}    # одновременных соединений на воркер
 S1_PAUSE=${S1_PAUSE:-20}                  # пауза между точками клиента: сервер перезапускается с новым N
 JUMBO=${JUMBO:-0}                         # 1 = MTU 9000 (на обеих машинах; при 8 ГБ hugepages — до 10 воркеров)
+
+# --- сценарий 2: dperf (машина A) -> nginx на ядре и на F-Stack (машина B), без bond и VXLAN ---
+# nginx работает на порту SERVER_PCI0, на первых N ядрах SERVER_CPUS, с адресами SERVER_IP,
+# SERVER_IP+1, ... — по адресу на воркер dperf (FDIR, как в сценарии 1)
+NGINX_KERNEL=${NGINX_KERNEL:-/usr/local/nginx/sbin/nginx}          # nginx 1.28 без F-Stack
+NGINX_FSTACK=${NGINX_FSTACK:-/usr/local/nginx_fstack/sbin/nginx}   # nginx 1.28 --with-ff_module
+FF_TOP=${FF_TOP:-$FSTACK_DIR/tools/sbin/top}                       # загрузка CPU F-Stack: make -C f-stack/tools
+S2_STACKS=${S2_STACKS:-"kernel fstack"}               # шаги: стек nginx
+S2_CORES=${S2_CORES:-"1 2 4 6 8 12"}                  # перебор числа воркеров nginx
+S2_SIZES=${S2_SIZES:-"1k:2000 64k:1000 1m:200"}       # размер ответа : соединений dperf (на всех воркерах)
+S2_CLIENT_CORES=${S2_CLIENT_CORES:-4}                 # воркеров dperf = адресов у nginx
+S2_DURATION=${S2_DURATION:-30}                        # секунд замера на точку (+ ~17 с разгон и останов)
+S2_PAUSE=${S2_PAUSE:-20}                              # пауза клиента между точками: сервер перезапускает nginx
+S2_KERNEL_SENDFILE=${S2_KERNEL_SENDFILE:-on}          # off — ядро без sendfile, как F-Stack

@@ -2,15 +2,18 @@
 """Парсер логов dperf.
 
   ./parse_dperf.py results/s1-...-client [results/s1-...-server] [--csv out.csv]
+  ./parse_dperf.py results/s2-...-client [results/s2-...-server]
   ./parse_dperf.py --brief results/s1-...-client/bond0-vxlan0/n04.log
   ./parse_dperf.py dperf.out            # любой вывод dperf: stdout или /var/log/dperf/*.log
 
 По каждому прогону клиента: средние за установившийся режим — секунды
 [--skip, последняя - --tail], т.е. без разгона (slow_start) и останова.
-Если передан каталог сервера, его cpuUsage и ошибки берутся за то же окно
-по меткам времени (часы машин должны быть синхронизированы, NTP).
-По каждому шагу (bond/vxlan) — оптимум: минимальное число воркеров, дающее
-не меньше --opt от максимальной пропускной способности шага.
+Если передан каталог сервера, его загрузка CPU и ошибки берутся за то же окно
+по меткам времени (часы машин должны быть синхронизированы, NTP): в сценарии 1 —
+cpuUsage dperf, в сценарии 2 — загрузка ядер nginx (строки ngxcpu).
+По каждому шагу (сценарий 1 — bond/vxlan, сценарий 2 — стек и размер ответа) —
+оптимум: минимальное число воркеров, дающее не меньше --opt от максимальной
+пропускной способности шага. В сценарии 2 в итоге ещё и kernel против F-Stack.
 """
 import argparse
 import csv
@@ -21,8 +24,9 @@ import sys
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 STAMP = re.compile(r'^(\d{9,11}) ?(.*)$')
 DROPS = ('dropTx', 'tcpDrop', 'udpDrop', 'badRx')         # счётчики в секунду
-RETRANS = ('synRt', 'finRt', 'ackRt', 'pushRt', 'udpRt', 'skErr', 'httpErr')
+RETRANS = ('synRt', 'finRt', 'ackRt', 'pushRt', 'udpRt', 'skErr')
 NIC_ERRORS = ('ierrors', 'oerrors', 'imissed')             # накопительные счётчики порта
+UNITS = {'': 1, 'k': 1024, 'm': 1024 ** 2, 'g': 1024 ** 3}
 
 
 def number(s):
@@ -31,6 +35,12 @@ def number(s):
         return float(s) if '.' in s else int(s)
     except ValueError:
         return None
+
+
+def size_bytes(s):
+    """64k -> 65536; не размер -> 0."""
+    m = re.match(r'^(\d+)([kmg]?)$', s or '', re.I)
+    return int(m.group(1)) * UNITS[m.group(2).lower()] if m else 0
 
 
 def parse_log(path):
@@ -50,6 +60,10 @@ def parse_log(path):
             if not tok:
                 continue
             if tok[0] == 'Total':            # "Total Numbers:" — итоги за весь прогон, пропускаем
+                cur = None
+                continue
+            if tok[0] == 'ngxcpu':           # s2_nginx.sh: загрузка ядер nginx за секунду, % по ядрам
+                recs.append({'t': t, 'sec': len(recs), 'cpu': [float(x) for x in tok[1:]]})
                 cur = None
                 continue
             if tok[0] == 'seconds':
@@ -88,26 +102,30 @@ def summarize(path, meta, recs, args):
         'file': path,
         'session': os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(path)))),
         'step': meta.get('step') or os.path.basename(os.path.dirname(os.path.abspath(path))),
+        'size': meta.get('size', ''),            # сценарий 2: размер ответа nginx
         'cores': cores,
         'gbps_rx': mean(r.get('bitsRx', 0) for r in w) / 1e9,
         'gbps_tx': mean(r.get('bitsTx', 0) for r in w) / 1e9,
         'mpps': mean(r.get('pktRx', 0) + r.get('pktTx', 0) for r in w) / 1e6,
-        'mrps': mean(r.get('http2XX', r.get('tcpRsp', 0)) for r in w) / 1e6,
+        'krps': mean(r.get('http2XX', 0) for r in w) / 1e3,
         'cpu_cli': mean(mean(r['cpu']) for r in w if r['cpu']),
         'cpu_srv': None,
         'drops': drops,
         'retr': retr,
+        'http_err': sum(r.get('httpErr', 0) for r in w),
         'samples': len(w),
         't0': w[0]['t'],
         't1': w[-1]['t'],
     }
     s['gbps'] = s['gbps_rx'] + s['gbps_tx']
-    s['gbps_core'] = s['gbps'] / cores
+    # пропускная способность шага: в сценарии 1 оба направления, в сценарии 2 — ответы nginx
+    s['tput'] = s['gbps_rx'] if s['size'] else s['gbps']
+    s['gbps_core'] = s['tput'] / cores
     return s
 
 
 def attach_server(s, servers):
-    """cpuUsage первых N воркеров сервера и его ошибки за окно замера клиента."""
+    """Загрузка CPU первых N воркеров сервера и его ошибки за окно замера клиента."""
     if s['t0'] is None:
         return
     for meta, recs in servers:
@@ -126,13 +144,14 @@ def attach_server(s, servers):
 
 
 def collect(paths):
+    """-> [(файл, указан явно)]: каталоги обходятся рекурсивно по *.log."""
     files = []
     for p in paths:
         if os.path.isdir(p):
             for root, _, names in os.walk(p):
-                files += [os.path.join(root, n) for n in names if n.endswith('.log')]
+                files += [(os.path.join(root, n), False) for n in names if n.endswith('.log')]
         else:
-            files.append(p)
+            files.append((p, True))
     return sorted(files)
 
 
@@ -140,16 +159,45 @@ def pct(v):
     return '-' if v is None else '%.0f%%' % v
 
 
+def group_key(s):
+    return (s['session'], s['step'], s['size']) if s['size'] else (s['session'], s['step'])
+
+
+def group_order(key):
+    return key[:2] + ((size_bytes(key[2]),) if len(key) > 2 else ())
+
+
+def valid(r):
+    """Сценарий 2: прогон, где nginx не ответил ни одним 200 (только ошибки), не в счёт."""
+    return not r['size'] or r['krps'] > 0 or not r['http_err']
+
+
 def pick_optimum(rows, opt):
     """-> (оптимум, максимум): минимум воркеров с >= opt от лучшего результата шага."""
-    top = max(rows, key=lambda r: r['gbps'])
-    pick = next(r for r in rows if r['gbps'] >= opt * top['gbps'])
+    rows = [r for r in rows if valid(r)] or rows
+    top = max(rows, key=lambda r: r['tput'])
+    pick = next(r for r in rows if r['tput'] >= opt * top['tput'])
     return pick, top
 
 
 def print_group(key, rows, pick, top):
-    best = top['gbps'] or 1e-9
-    print('\n== %s / %s' % key)
+    best = top['tput'] or 1e-9
+    print('\n== %s' % ' / '.join(key))
+    if len(key) > 2:                                       # сценарий 2: dperf -> nginx
+        print('%6s %8s %9s %10s %8s %8s %8s %7s %6s' % (
+            'cores', 'Gbps', 'Krps', 'Gbps/core', 'cpu_srv', 'cpu_cli', 'httpErr', 'drops', 'retr'))
+        for r in rows:
+            print('%6d %8.1f %9.1f %10.1f %8s %8s %8d %7d %6d%s' % (
+                r['cores'], r['gbps_rx'], r['krps'], r['gbps_core'], pct(r['cpu_srv']), pct(r['cpu_cli']),
+                r['http_err'], r['drops'], r['retr'], '  <- оптимум' if r is pick and valid(r) else ''))
+        if valid(top):
+            print('максимум %.1f Gbps (%.1f Krps) при N=%d; оптимум N=%d: %.1f Gbps (%.0f%% от максимума, %.1f Gbps на ядро)' % (
+                top['tput'], top['krps'], top['cores'], pick['cores'], pick['tput'], 100 * pick['tput'] / best,
+                pick['gbps_core']))
+        if any(r['http_err'] for r in rows):
+            print('httpErr > 0: nginx отвечал не 200 — на сервере другое число воркеров (клиент и сервер разошлись '
+                  'по точкам) или нет файлов ответов')
+        return
     print('%6s %8s %8s %9s %7s %10s %8s %8s %7s %6s' % (
         'cores', 'Gbps_rx', 'Gbps_tx', 'Gbps_sum', 'Mpps', 'Gbps/core', 'cpu_cli', 'cpu_srv', 'drops', 'retr'))
     for r in rows:
@@ -158,6 +206,24 @@ def print_group(key, rows, pick, top):
             pct(r['cpu_cli']), pct(r['cpu_srv']), r['drops'], r['retr'], '  <- оптимум' if r is pick else ''))
     print('максимум %.1f Gbps при N=%d; оптимум N=%d: %.1f Gbps (%.0f%% от максимума, %.1f Gbps на ядро)' % (
         top['gbps'], top['cores'], pick['cores'], pick['gbps'], 100 * pick['gbps'] / best, pick['gbps_core']))
+
+
+def print_compare(rows):
+    """Сценарий 2: kernel против F-Stack при одном и том же размере ответа и числе воркеров nginx."""
+    for session in sorted({r['session'] for r in rows if r['size']}):
+        by = {(r['size'], r['cores'], r['step']): r for r in rows if r['session'] == session and r['size']}
+        if not {'kernel', 'fstack'} <= {k[2] for k in by}:
+            continue
+        print('\n== kernel против F-Stack: %s' % session)
+        print('%6s %6s %10s %10s %9s %9s %9s %8s %8s' % (
+            'size', 'cores', 'kern_Gbps', 'kern_Krps', 'kern_cpu', 'ff_Gbps', 'ff_Krps', 'ff_cpu', 'ff/kern'))
+        for size, cores in sorted({k[:2] for k in by}, key=lambda k: (size_bytes(k[0]), k[1])):
+            k, f = by.get((size, cores, 'kernel')), by.get((size, cores, 'fstack'))
+            cols = []
+            for r in (k, f):
+                cols += ['%.1f' % r['gbps_rx'], '%.1f' % r['krps'], pct(r['cpu_srv'])] if r else ['-'] * 3
+            ratio = '%.2fx' % (f['krps'] / k['krps']) if k and f and k['krps'] and f['krps'] else '-'
+            print('%6s %6d %10s %10s %9s %9s %9s %8s %8s' % tuple([size, cores] + cols + [ratio]))
 
 
 def main():
@@ -172,10 +238,14 @@ def main():
     args = ap.parse_args()
 
     clients, servers = [], []
-    for f in collect(args.paths):
+    for f, explicit in collect(args.paths):
         meta, recs = parse_log(f)
         if not recs:
-            print('%s: нет секундной статистики (dperf не стартовал?)' % f)
+            # в каталогах бывают и чужие *.log (например, error.log nginx) — о них молчим
+            if meta.get('scenario') == 's2' and meta.get('role') == 'server':
+                print('%s: нет замеров CPU (клиент не дал трафика или не сработал ff_top)' % f)
+            elif meta or explicit:
+                print('%s: нет секундной статистики (dperf не стартовал?)' % f)
             continue
         (servers if meta.get('role') == 'server' else clients).append((f, meta, recs))
     if not clients:
@@ -189,16 +259,21 @@ def main():
 
     if args.brief:
         for s in rows:
-            print('%s: rx %.1f  tx %.1f  sum %.1f Gbps  %.1f Mpps  cpu %s  drops %d  retr %d' % (
-                os.path.basename(s['file']), s['gbps_rx'], s['gbps_tx'], s['gbps'], s['mpps'],
-                pct(s['cpu_cli']), s['drops'], s['retr']))
+            if s['size']:
+                print('%s: %.1f Gbps  %.1f Krps  cpu_cli %s  httpErr %d  drops %d  retr %d' % (
+                    os.path.basename(s['file']), s['gbps_rx'], s['krps'], pct(s['cpu_cli']),
+                    s['http_err'], s['drops'], s['retr']))
+            else:
+                print('%s: rx %.1f  tx %.1f  sum %.1f Gbps  %.1f Mpps  cpu %s  drops %d  retr %d' % (
+                    os.path.basename(s['file']), s['gbps_rx'], s['gbps_tx'], s['gbps'], s['mpps'],
+                    pct(s['cpu_cli']), s['drops'], s['retr']))
         return
 
     groups = {}
     for s in rows:
-        groups.setdefault((s['session'], s['step']), []).append(s)
+        groups.setdefault(group_key(s), []).append(s)
     summary = []
-    for key in sorted(groups):
+    for key in sorted(groups, key=group_order):
         g = sorted(groups[key], key=lambda r: r['cores'])
         summary.append((key, g) + pick_optimum(g, args.opt))
         if not args.summary:
@@ -206,19 +281,23 @@ def main():
 
     if len(summary) > 1 or args.summary:
         print('\n== Итог: оптимум — минимум воркеров с >= %.0f%% от максимума шага' % (100 * args.opt))
-        width = max(len('%s / %s' % key) for key, *_ in summary)
+        width = max(len(' / '.join(key)) for key, *_ in summary)
         print('%-*s %9s %10s %9s %8s %8s' % (width, 'сессия / шаг', 'max_Gbps', 'opt_cores', 'opt_Gbps', 'cpu_cli', 'cpu_srv'))
         for key, g, pick, top in summary:
+            if not valid(top):
+                print('%-*s  нет ответов 200 (httpErr)' % (width, ' / '.join(key)))
+                continue
             print('%-*s %9.1f %10d %9.1f %8s %8s' % (
-                width, '%s / %s' % key, top['gbps'], pick['cores'], pick['gbps'], pct(pick['cpu_cli']), pct(pick['cpu_srv'])))
+                width, ' / '.join(key), top['tput'], pick['cores'], pick['tput'], pct(pick['cpu_cli']), pct(pick['cpu_srv'])))
+        print_compare(rows)
 
     if args.csv:
-        cols = ['session', 'step', 'cores', 'gbps_rx', 'gbps_tx', 'gbps', 'mpps', 'mrps', 'gbps_core',
-                'cpu_cli', 'cpu_srv', 'drops', 'retr', 'samples', 'file']
+        cols = ['session', 'step', 'size', 'cores', 'gbps_rx', 'gbps_tx', 'gbps', 'mpps', 'krps', 'gbps_core',
+                'cpu_cli', 'cpu_srv', 'drops', 'retr', 'http_err', 'samples', 'file']
         with open(args.csv, 'w', newline='') as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
             w.writeheader()
-            for s in sorted(rows, key=lambda r: (r['session'], r['step'], r['cores'])):
+            for s in sorted(rows, key=lambda r: (r['session'], r['step'], size_bytes(r['size']), r['cores'])):
                 w.writerow({k: round(v, 3) if isinstance(v, float) else v for k, v in s.items()})
         print('\nCSV: %s' % args.csv)
 
