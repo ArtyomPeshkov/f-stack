@@ -10,6 +10,7 @@
 set -u
 cd "$(dirname "$0")"
 . ./env.sh
+. ./common.sh
 
 role=${1:-}
 case $role in
@@ -18,7 +19,6 @@ case $role in
     *) echo "usage: $0 server|client"; exit 1 ;;
 esac
 
-die() { echo "ОШИБКА: $*" >&2; exit 1; }
 NMAX=$(printf '%s\n' $S1_CORES | sort -n | tail -n1)
 for c in python3 stdbuf pkill pgrep; do command -v $c >/dev/null || die "нет $c"; done
 [ -x "$DPERF" ] || die "нет $DPERF — соберите: ./build_dperf.sh"
@@ -74,24 +74,6 @@ gen_conf() {
 meta() {   # <bond> <vxlan> <число воркеров>
     echo "# scenario=s1 role=$role step=bond$1-vxlan$2 bond=$1 vxlan=$2 cores=$3" \
          "jumbo=$JUMBO duration=$S1_DURATION cc_per_core=$S1_CC_PER_CORE host=$(hostname)"
-}
-
-# В терминал: строка в секунду и всё, что не статистика (ошибки, EAL)
-VIEW='
-/Total Numbers/ { done = 1 }
-done { next }
-$2 == "seconds" { s = $3; c = 0; for (i = 5; i <= NF; i++) c += $i; cpu = NF > 4 ? c / (NF - 4) : 0; next }
-$2 == "pktRx" { rx = $7; tx = $9; gsub(",", "", rx); gsub(",", "", tx)
-                printf "%s %4ss  rx %6.1f  tx %6.1f Gbps  cpu %3.0f%%\n", tag, s, rx / 1e9, tx / 1e9, cpu; fflush(); next }
-$2 ~ /^(tcpRx|udpRx|arpRx|tosRx|kniRx|synRx|synRt|udpRt|tcpDrop|skOpen|httpGet|tcpReq|ierrors)$/ { next }
-/^[0-9]+ *$/ || /^[0-9]+ -+$/ || /dperf Test Finished|^[0-9]+ (Version|License|Author):/ { next }
-{ sub(/^[0-9]+ /, ""); print; fflush() }'
-
-# dperf -> лог, каждая строка с меткой времени (по ним сводятся клиент и сервер)
-run_dperf() {   # <conf> <log> <метка>
-    stdbuf -oL "$DPERF" -c "$1" 2>&1 |
-        while IFS= read -r l; do printf '%(%s)T %s\n' -1 "$l"; done |
-        tee -a "$2" | awk -v tag="$3" "$VIEW"
 }
 
 stop_server() {
