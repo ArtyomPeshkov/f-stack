@@ -30,7 +30,8 @@
      `isolcpus=<ядра> nohz_full=<ядра> rcu_nocbs=<ядра>`, затем перезагрузка;
    - HT: в списки ядер `env.sh` берите по одному потоку на физическое ядро.
 2. **Сборка dperf** на обеих машинах: `./build_dperf.sh`. Скрипт сам найдёт `libdpdk.pc`
-   в `f-stack/build/dpdk-build`; уже выставленный `PKG_CONFIG_PATH` имеет приоритет.
+   в `f-stack/build/dpdk-build` и поставит его первым, даже если `PKG_CONFIG_PATH` уже задан;
+   какой `libdpdk.pc` взят — печатает. В `DPERF_DIR` должен лежать Makefile dperf (исходники).
 3. **`env.sh`** — заполнить и положить одинаковым на обе машины:
    - `*_PCI0` / `*_PCI1` — порты mlx5 с доменом: `lspci -D | grep -i mellanox`;
    - `*_CPUS` — до 12 ядер на NUMA-узле карты: `cat /sys/bus/pci/devices/<pci>/numa_node`, `lscpu`;
