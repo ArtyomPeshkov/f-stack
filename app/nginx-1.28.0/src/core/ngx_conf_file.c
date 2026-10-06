@@ -8,7 +8,11 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+/* the longest config parameter; can be raised at build time,
+ * e.g. --with-cc-opt=-DNGX_CONF_BUFFER=131072 */
+#ifndef NGX_CONF_BUFFER
 #define NGX_CONF_BUFFER  4096
+#endif
 
 static ngx_int_t ngx_conf_add_dump(ngx_conf_t *cf, ngx_str_t *filename);
 static ngx_int_t ngx_conf_handler(ngx_conf_t *cf, ngx_int_t last);
