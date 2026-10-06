@@ -64,3 +64,8 @@ S2_CLIENT_CORES=${S2_CLIENT_CORES:-4}                 # воркеров dperf =
 S2_DURATION=${S2_DURATION:-30}                        # секунд замера на точку (+ ~17 с разгон и останов)
 S2_PAUSE=${S2_PAUSE:-20}                              # пауза клиента между точками: сервер перезапускает nginx
 S2_KERNEL_SENDFILE=${S2_KERNEL_SENDFILE:-on}          # off — ядро без sendfile, как F-Stack
+S2_BODY=${S2_BODY:-file}                              # file — ответы из файлов; return — тело в nginx.conf (до 4000 байт)
+S2_CONN=${S2_CONN:-keepalive}                         # keepalive — соединения живут весь прогон;
+                                                      # close — короткие: 2 запроса, закрытие, новое соединение (CPS)
+S2_KEEPALIVE=${S2_KEEPALIVE:-0us}                     # keepalive: пауза перед следующим запросом; 0us — сразу
+S2_CPS=${S2_CPS:-2000000}                             # close: потолок новых соединений в секунду у dperf

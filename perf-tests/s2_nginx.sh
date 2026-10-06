@@ -5,9 +5,11 @@
 # Шаг = стек nginx (S2_STACKS: kernel, fstack). Внутри шага клиент перебирает число воркеров
 # nginx N (S2_CORES), а для каждого N — размеры ответа (S2_SIZES). Сервер поднимает nginx ровно
 # с N воркерами на первых N ядрах SERVER_CPUS и перезапускает его со следующим N, когда клиент
-# прогнал все размеры: прогоны он отсчитывает по трафику порта. dperf работает в замкнутом цикле
-# keepalive: следующий запрос уходит сразу после ответа. Воркер i dperf ходит на свой адрес nginx
-# SERVER_IP + i (FDIR, как в сценарии 1), поэтому у nginx S2_CLIENT_CORES адресов.
+# прогнал все размеры: прогоны он отсчитывает по трафику порта. dperf работает в замкнутом цикле:
+# держит cc соединений, и следующий запрос уходит сразу после ответа (S2_CONN=keepalive), либо
+# соединение после двух запросов закрывается и вместо него открывается новое (S2_CONN=close, CPS).
+# Воркер i dperf ходит на свой адрес nginx SERVER_IP + i (FDIR, как в сценарии 1), поэтому
+# у nginx S2_CLIENT_CORES адресов.
 # Порядок: Enter на сервере -> Enter на клиенте, по одному разу на шаг.
 set -u
 cd "$(dirname "$0")"
@@ -27,21 +29,36 @@ NMAX=$(printf '%s\n' $S2_CORES | sort -n | tail -n1)
 for s in $S2_SIZES; do
     [[ $s =~ ^[0-9]+[km]?:[0-9]+$ ]] || die "S2_SIZES: '$s' — нужно <размер>:<соединений>, например 64k:1000"
 done
+case $S2_CONN in keepalive|close) ;; *) die "S2_CONN: keepalive или close" ;; esac
+case $S2_BODY in file|return) ;; *) die "S2_BODY: file или return" ;; esac
+MAXCC=$(printf '%s\n' $S2_SIZES | cut -d: -f2 | sort -n | tail -n1)
 
 first() { echo $CPUS | cut -d' ' -f1-"$1"; }       # первые N ядер роли
 ipn() { echo "${1%.*}.$(( ${1##*.} + $2 ))"; }      # IP + i в последнем октете
 bytes() {                                           # 64k -> 65536
     case $1 in *k) echo $(( ${1%k} * 1024 )) ;; *m) echo $(( ${1%m} * 1048576 )) ;; *) echo "$1" ;; esac
 }
+mode() { echo "$S2_CONN-$S2_BODY"; }                # режим точки в логах: keepalive-file, close-return, ...
 
 # ---------- клиент ----------
+
+# Новых соединений в секунду у dperf: keepalive — разгон до cc за 5 с, close — потолок S2_CPS
+cps() { if [ "$S2_CONN" = close ]; then echo "$S2_CPS"; else echo $(( ($1 + 4) / 5 )); fi; }
+
+# Клиентских адресов dperf: у воркера на каждый адрес 65535 портов, а сокетов нужно не меньше
+# его доли cc и его доли cps за 2 с (таймаут ретрансмиссии dperf, пока сокет занят)
+client_ips() {   # <соединений>
+    local need=$(( $1 / K )) c=$(( $(cps "$1") / K * 2 ))
+    [ "$c" -le "$need" ] || need=$c
+    echo $(( need / 65000 + 1 ))
+}
 
 # Конфиг dperf: gen_conf <N воркеров nginx> <размер> <соединений>
 gen_conf() {
     echo "mode         client"
     echo "cpu          $(first "$K")"
     echo "port         $CLIENT_PCI0 $CLIENT_IP $SERVER_IP $SERVER_MAC"
-    echo "client       $CLIENT_IP 1"
+    echo "client       $CLIENT_IP $(client_ips "$3")"
     echo "server       $SERVER_IP $K"
     echo "listen       80 1"
     echo "protocol     http"
@@ -50,8 +67,12 @@ gen_conf() {
     echo "duration     ${S2_DURATION}s"
     echo "slow_start   10"
     echo "cc           $3"
-    echo "cps          $(( ($3 + 4) / 5 ))"
-    echo "keepalive    0us"
+    echo "cps          $(cps "$3")"
+    if [ "$S2_CONN" = close ]; then
+        echo "keepalive    10us 1"        # dperf: первый запрос + 1 повтор, затем закрывает сам
+    else
+        echo "keepalive    $S2_KEEPALIVE"
+    fi
 }
 
 # ---------- сервер ----------
@@ -101,20 +122,42 @@ kernel_queues() {   # <ядра воркеров...>
     done
 }
 
+# S2_BODY=return: тела ответов прямо в конфиге, по location на размер. Только до 4000 байт:
+# параметр длиннее nginx не принимает (буфер разбора конфига — 4 КБ), такие размеры идут из файлов.
+return_conf() {   # <N>
+    local s size b
+    [ "$S2_BODY" = return ] || return 0
+    for s in $S2_SIZES; do
+        size=${s%%:*} b=$(bytes "${s%%:*}")
+        [ "$b" -le 4000 ] || continue
+        printf 'location = /n%s/%s { return 200 "%s"; }\n' "$1" "$size" \
+            "$(yes 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ | tr -d '\n' | head -c "$b")"
+    done
+}
+
 # Конфиги точки из шаблонов nginx/ и запуск nginx на переднем плане (вывод в stdout.txt)
 start_nginx() {   # <стек> <N> <каталог точки>
-    local stack=$1 n=$2 run=$3 c aff= mask=0 vip= i bin
+    local stack=$1 n=$2 run=$3 c aff= mask=0 vip= i bin conns nofile
+    # соединений на воркер: наибольший cc из S2_SIZES с запасом в полтора раза — RSS раскладывает
+    # соединения по воркерам неровно; дескрипторов — столько же и ещё на файлы
+    conns=$(( MAXCC * 3 / (2 * n) + 1024 ))
+    [ "$conns" -ge 65536 ] || conns=65536
+    nofile=$(( conns + 4096 ))
+    [ "$nofile" -le "$(cat /proc/sys/fs/nr_open)" ] || sysctl -q -w fs.nr_open="$nofile"
     mkdir -p "$run/logs"
+    return_conf "$n" > "$run/return.conf"
     if [ "$stack" = kernel ]; then
         for c in $(first "$n"); do aff="$aff 1$(printf '%*s' "$c" '' | tr ' ' 0)"; done
         sed -e "s|@WORKERS@|$n|g" -e "s|@AFFINITY@|${aff# }|" -e "s|@SENDFILE@|$S2_KERNEL_SENDFILE|" \
-            -e "s|@ROOT@|$WWW|g" nginx/nginx-kernel.conf > "$run/nginx.conf"
+            -e "s|@ROOT@|$WWW|g" -e "s|@CONNS@|$conns|" -e "s|@NOFILE@|$nofile|" \
+            nginx/nginx-kernel.conf > "$run/nginx.conf"
         bin=$NGINX_KERNEL
     else
         for c in $(first "$n"); do mask=$(( mask | 1 << c )); done
         for ((i = 1; i < K; i++)); do vip="$vip${vip:+;}$(ipn "$SERVER_IP" "$i")"; done
         if [ -n "$vip" ]; then vip="s|@VIP@|$vip|"; else vip='/@VIP@/d'; fi
         sed -e "s|@WORKERS@|$n|g" -e "s|@RUN@|$run|g" -e "s|@ROOT@|$WWW|g" \
+            -e "s|@CONNS@|$conns|" -e "s|@NOFILE@|$nofile|" \
             nginx/nginx-fstack.conf > "$run/nginx.conf"
         sed -e "s|@LCORE_MASK@|$(printf %x "$mask")|" -e "s|@PCI@|$PCI|" -e "s|@IP@|$SERVER_IP|" \
             -e "s|@BCAST@|${SERVER_IP%.*}.255|" -e "s|@GW@|$CLIENT_IP|" -e "$vip" \
@@ -231,6 +274,12 @@ if [ "$role" = server ]; then
                     [ -x "$FF_TOP" ] || echo "ВНИМАНИЕ: нет $FF_TOP — загрузка CPU F-Stack замеряться не будет (make -C f-stack/tools)" ;;
             *) die "S2_STACKS: неизвестный стек '$stack', есть kernel и fstack" ;;
         esac
+        # return — директива модуля rewrite: без него nginx с S2_BODY=return не запустится
+        if [ "$S2_BODY" = return ]; then
+            bin=$NGINX_KERNEL; [ "$stack" = kernel ] || bin=$NGINX_FSTACK
+            "$bin" -V 2>&1 | grep -q -- --without-http_rewrite_module &&
+                die "$bin собран без модуля rewrite, а S2_BODY=return отдаёт ответы директивой return"
+        fi
     done
     ethtool -S "$IF" | grep -q tx_vport_unicast_packets ||
         die "ethtool -S $IF: нет счётчиков vport (tx_vport_unicast_packets) — по ним сервер видит прогоны клиента"
@@ -242,6 +291,11 @@ else
     for c in python3 stdbuf; do command -v $c >/dev/null || die "нет $c"; done
     [ -x "$DPERF" ] || die "нет $DPERF — соберите: ./build_dperf.sh"
     [ "$(echo $CPUS | wc -w)" -ge "$K" ] || die "в CLIENT_CPUS меньше $K ядер (S2_CLIENT_CORES)"
+    # адреса dperf CLIENT_IP.. не должны заходить на адреса nginx SERVER_IP..
+    c0=${CLIENT_IP##*.} s0=${SERVER_IP##*.} ips=$(client_ips "$MAXCC")
+    if [ $((c0 + ips - 1)) -gt 254 ] || { [ "$c0" -le $((s0 + K - 1)) ] && [ "$s0" -le $((c0 + ips - 1)) ]; }; then
+        die "dperf нужно $ips адресов от $CLIENT_IP, они заходят на адреса nginx от $SERVER_IP — уменьшите cc или S2_CPS"
+    fi
 fi
 
 # ---------- прогон ----------
@@ -256,6 +310,11 @@ if [ "$role" = server ]; then
     WWW=$SESSION/www
     mkdir -p "$WWW"
     for s in $S2_SIZES; do head -c "$(bytes "${s%%:*}")" /dev/urandom > "$WWW/${s%%:*}"; done
+    for s in $S2_SIZES; do
+        if [ "$S2_BODY" = return ] && [ "$(bytes "${s%%:*}")" -gt 4000 ]; then
+            echo "S2_BODY=return: ответ ${s%%:*} длиннее 4000 байт — nginx отдаёт его из файла"
+        fi
+    done
     SAMPLER= NGINX=
     # HUP — закрыли терминал: сам nginx на HUP лишь перечитывает конфиг, гасим его сами
     trap 'stop_point; ip addr flush dev "$IF"; exit 130' INT TERM HUP
@@ -271,7 +330,7 @@ if [ "$role" = server ]; then
         for n in $S2_CORES; do
             base=$dir/n$(printf %02d "$n")
             if [ "$stack" = kernel ]; then kernel_queues $(first "$n"); fi
-            echo "# scenario=s2 role=server step=$stack stack=$stack cores=$n host=$(hostname)" > "$base.log"
+            echo "# scenario=s2 role=server step=$stack stack=$stack cores=$n mode=$(mode) host=$(hostname)" > "$base.log"
             start_nginx "$stack" "$n" "$base"
             echo "[server] $stack, воркеров nginx: $n — жду прогонов клиента: $(echo $S2_SIZES | wc -w)"
             for s in $S2_SIZES; do wait_client_run "$stack" "$n" "$base" || break; done
@@ -290,7 +349,7 @@ else
                 size=${s%%:*} cc=${s##*:}
                 base=$dir/n$(printf %02d "$n")-$size
                 gen_conf "$n" "$size" "$cc" > "$base.conf"
-                echo "# scenario=s2 role=client step=$stack stack=$stack cores=$n size=$size cc=$cc" \
+                echo "# scenario=s2 role=client step=$stack stack=$stack cores=$n size=$size cc=$cc mode=$(mode)" \
                      "client_cores=$K duration=$S2_DURATION host=$(hostname)" > "$base.log"
                 echo "--- $stack, воркеров nginx: $n, ответ $size, соединений $cc (~$((S2_DURATION + 17)) с)"
                 run_dperf "$base.conf" "$base.log" "[$stack n=$n $size]"

@@ -103,11 +103,13 @@ def summarize(path, meta, recs, args):
         'session': os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(path)))),
         'step': meta.get('step') or os.path.basename(os.path.dirname(os.path.abspath(path))),
         'size': meta.get('size', ''),            # сценарий 2: размер ответа nginx
+        'mode': meta.get('mode', ''),            # сценарий 2: соединения и тело ответа, keepalive-file, ...
         'cores': cores,
         'gbps_rx': mean(r.get('bitsRx', 0) for r in w) / 1e9,
         'gbps_tx': mean(r.get('bitsTx', 0) for r in w) / 1e9,
         'mpps': mean(r.get('pktRx', 0) + r.get('pktTx', 0) for r in w) / 1e6,
         'krps': mean(r.get('http2XX', 0) for r in w) / 1e3,
+        'kcps': mean(r.get('skOpen', 0) for r in w) / 1e3,
         'cpu_cli': mean(mean(r['cpu']) for r in w if r['cpu']),
         'cpu_srv': None,
         'drops': drops,
@@ -120,6 +122,8 @@ def summarize(path, meta, recs, args):
     s['gbps'] = s['gbps_rx'] + s['gbps_tx']
     # пропускная способность шага: в сценарии 1 оба направления, в сценарии 2 — ответы nginx
     s['tput'] = s['gbps_rx'] if s['size'] else s['gbps']
+    # подпись в таблицах сценария 2: размер, а для режима не по умолчанию — и режим, "600 close-return"
+    s['label'] = s['size'] + ('' if s['mode'] in ('', 'keepalive-file') else ' ' + s['mode'])
     s['gbps_core'] = s['tput'] / cores
     return s
 
@@ -160,11 +164,11 @@ def pct(v):
 
 
 def group_key(s):
-    return (s['session'], s['step'], s['size']) if s['size'] else (s['session'], s['step'])
+    return (s['session'], s['step'], s['label']) if s['size'] else (s['session'], s['step'])
 
 
 def group_order(key):
-    return key[:2] + ((size_bytes(key[2]),) if len(key) > 2 else ())
+    return key[:2] + ((size_bytes(key[2].split()[0]), key[2]) if len(key) > 2 else ())
 
 
 def valid(r):
@@ -184,11 +188,11 @@ def print_group(key, rows, pick, top):
     best = top['tput'] or 1e-9
     print('\n== %s' % ' / '.join(key))
     if len(key) > 2:                                       # сценарий 2: dperf -> nginx
-        print('%6s %8s %9s %10s %8s %8s %8s %7s %6s' % (
-            'cores', 'Gbps', 'Krps', 'Gbps/core', 'cpu_srv', 'cpu_cli', 'httpErr', 'drops', 'retr'))
+        print('%6s %8s %9s %8s %10s %8s %8s %8s %7s %6s' % (
+            'cores', 'Gbps', 'Krps', 'Kcps', 'Gbps/core', 'cpu_srv', 'cpu_cli', 'httpErr', 'drops', 'retr'))
         for r in rows:
-            print('%6d %8.1f %9.1f %10.1f %8s %8s %8d %7d %6d%s' % (
-                r['cores'], r['gbps_rx'], r['krps'], r['gbps_core'], pct(r['cpu_srv']), pct(r['cpu_cli']),
+            print('%6d %8.1f %9.1f %8.1f %10.1f %8s %8s %8d %7d %6d%s' % (
+                r['cores'], r['gbps_rx'], r['krps'], r['kcps'], r['gbps_core'], pct(r['cpu_srv']), pct(r['cpu_cli']),
                 r['http_err'], r['drops'], r['retr'], '  <- оптимум' if r is pick and valid(r) else ''))
         if valid(top):
             print('максимум %.1f Gbps (%.1f Krps) при N=%d; оптимум N=%d: %.1f Gbps (%.0f%% от максимума, %.1f Gbps на ядро)' % (
@@ -224,19 +228,22 @@ def print_compare(rows):
 
 
 def compare_table(title, rows):
-    by = {(r['size'], r['cores'], r['step']): r for r in rows}
+    by = {(r['label'], r['cores'], r['step']): r for r in rows}
     if not {'kernel', 'fstack'} <= {k[2] for k in by}:
         return
+    width = max(6, max(len(k[0]) for k in by))
+    fmt = '%*s %5s %9s %9s %9s %8s %8s %8s %8s %8s %8s'
     print('\n== kernel против F-Stack: %s' % title)
-    print('%6s %6s %10s %10s %9s %9s %9s %8s %8s' % (
-        'size', 'cores', 'kern_Gbps', 'kern_Krps', 'kern_cpu', 'ff_Gbps', 'ff_Krps', 'ff_cpu', 'ff/kern'))
-    for size, cores in sorted({k[:2] for k in by}, key=lambda k: (size_bytes(k[0]), k[1])):
-        k, f = by.get((size, cores, 'kernel')), by.get((size, cores, 'fstack'))
+    print(fmt % (width, 'size', 'cores', 'kern_Gbps', 'kern_Krps', 'kern_Kcps', 'kern_cpu',
+                 'ff_Gbps', 'ff_Krps', 'ff_Kcps', 'ff_cpu', 'ff/kern'))
+    for label, cores in sorted({k[:2] for k in by}, key=lambda k: (size_bytes(k[0].split()[0]), k[0], k[1])):
+        k, f = by.get((label, cores, 'kernel')), by.get((label, cores, 'fstack'))
         cols = []
         for r in (k, f):
-            cols += ['%.1f' % r['gbps_rx'], '%.1f' % r['krps'], pct(r['cpu_srv'])] if r else ['-'] * 3
+            cols += (['%.1f' % r['gbps_rx'], '%.1f' % r['krps'], '%.1f' % r['kcps'], pct(r['cpu_srv'])]
+                     if r else ['-'] * 4)
         ratio = '%.2fx' % (f['krps'] / k['krps']) if k and f and k['krps'] and f['krps'] else '-'
-        print('%6s %6d %10s %10s %9s %9s %9s %8s %8s' % tuple([size, cores] + cols + [ratio]))
+        print(fmt % tuple([width, label, cores] + cols + [ratio]))
 
 
 def main():
@@ -273,8 +280,8 @@ def main():
     if args.brief:
         for s in rows:
             if s['size']:
-                print('%s: %.1f Gbps  %.1f Krps  cpu_cli %s  httpErr %d  drops %d  retr %d' % (
-                    os.path.basename(s['file']), s['gbps_rx'], s['krps'], pct(s['cpu_cli']),
+                print('%s: %.1f Gbps  %.1f Krps  %.1f Kcps  cpu_cli %s  httpErr %d  drops %d  retr %d' % (
+                    os.path.basename(s['file']), s['gbps_rx'], s['krps'], s['kcps'], pct(s['cpu_cli']),
                     s['http_err'], s['drops'], s['retr']))
             else:
                 print('%s: rx %.1f  tx %.1f  sum %.1f Gbps  %.1f Mpps  cpu %s  drops %d  retr %d' % (
@@ -305,12 +312,12 @@ def main():
         print_compare(rows)
 
     if args.csv:
-        cols = ['session', 'step', 'size', 'cores', 'gbps_rx', 'gbps_tx', 'gbps', 'mpps', 'krps', 'gbps_core',
-                'cpu_cli', 'cpu_srv', 'drops', 'retr', 'http_err', 'samples', 'file']
+        cols = ['session', 'step', 'size', 'mode', 'cores', 'gbps_rx', 'gbps_tx', 'gbps', 'mpps', 'krps', 'kcps',
+                'gbps_core', 'cpu_cli', 'cpu_srv', 'drops', 'retr', 'http_err', 'samples', 'file']
         with open(args.csv, 'w', newline='') as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
             w.writeheader()
-            for s in sorted(rows, key=lambda r: (r['session'], r['step'], size_bytes(r['size']), r['cores'])):
+            for s in sorted(rows, key=lambda r: (r['session'], r['step'], size_bytes(r['size']), r['label'], r['cores'])):
                 w.writerow({k: round(v, 3) if isinstance(v, float) else v for k, v in s.items()})
         print('\nCSV: %s' % args.csv)
 
