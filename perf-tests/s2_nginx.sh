@@ -122,14 +122,28 @@ kernel_queues() {   # <ядра воркеров...>
     done
 }
 
-# S2_BODY=return: тела ответов прямо в конфиге, по location на размер. Только до 4000 байт:
-# параметр длиннее nginx не принимает (буфер разбора конфига — 4 КБ), такие размеры идут из файлов.
+# Самый длинный ответ, который влезает в конфиг: параметр длиннее буфера разбора NGX_CONF_BUFFER
+# nginx не принимает. Это 4096 байт, если nginx собран без --with-cc-opt=-DNGX_CONF_BUFFER=...
+# Берётся меньший из двух nginx, чтобы ядро и F-Stack отдавали из конфига одни и те же размеры.
+return_max() {
+    local bin b m=
+    for bin in "$NGINX_KERNEL" "$NGINX_FSTACK"; do
+        [ -x "$bin" ] || continue
+        b=$("$bin" -V 2>&1 | grep -o 'NGX_CONF_BUFFER=[0-9]*' | cut -d= -f2)
+        b=${b:-4096}
+        if [ -z "$m" ] || [ "$b" -lt "$m" ]; then m=$b; fi
+    done
+    echo $(( ${m:-4096} - 96 ))      # запас на кавычки
+}
+
+# S2_BODY=return: тела ответов прямо в конфиге, по location на размер. Строку из конфига nginx
+# отдаёт без копирования; ответы длиннее RETURN_MAX идут из файлов.
 return_conf() {   # <N>
     local s size b
     [ "$S2_BODY" = return ] || return 0
     for s in $S2_SIZES; do
         size=${s%%:*} b=$(bytes "${s%%:*}")
-        [ "$b" -le 4000 ] || continue
+        [ "$b" -le "$RETURN_MAX" ] || continue
         printf 'location = /n%s/%s { return 200 "%s"; }\n' "$1" "$size" \
             "$(yes 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ | tr -d '\n' | head -c "$b")"
     done
@@ -310,9 +324,11 @@ if [ "$role" = server ]; then
     WWW=$SESSION/www
     mkdir -p "$WWW"
     for s in $S2_SIZES; do head -c "$(bytes "${s%%:*}")" /dev/urandom > "$WWW/${s%%:*}"; done
+    RETURN_MAX=$(return_max)
     for s in $S2_SIZES; do
-        if [ "$S2_BODY" = return ] && [ "$(bytes "${s%%:*}")" -gt 4000 ]; then
-            echo "S2_BODY=return: ответ ${s%%:*} длиннее 4000 байт — nginx отдаёт его из файла"
+        if [ "$S2_BODY" = return ] && [ "$(bytes "${s%%:*}")" -gt "$RETURN_MAX" ]; then
+            echo "S2_BODY=return: ответ ${s%%:*} длиннее $RETURN_MAX байт — nginx отдаёт его из файла" \
+                 "(предел задаёт NGX_CONF_BUFFER при сборке nginx, см. README)"
         fi
     done
     SAMPLER= NGINX=
