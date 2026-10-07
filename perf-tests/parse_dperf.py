@@ -11,7 +11,7 @@
 Если передан каталог сервера, его загрузка CPU и ошибки берутся за то же окно
 по меткам времени (часы машин должны быть синхронизированы, NTP): в сценарии 1 —
 cpuUsage dperf, в сценарии 2 — загрузка ядер nginx (строки ngxcpu).
-По каждому шагу (сценарий 1 — bond/vxlan, сценарий 2 — стек и размер ответа) —
+По каждому шагу (сценарий 1 — bond/vxlan/направление, сценарий 2 — стек и размер ответа) —
 оптимум: минимальное число воркеров, дающее не меньше --opt от максимальной
 пропускной способности шага. В сценарии 2 в итоге ещё и kernel против F-Stack.
 """
@@ -120,8 +120,14 @@ def summarize(path, meta, recs, args):
         't1': w[-1]['t'],
     }
     s['gbps'] = s['gbps_rx'] + s['gbps_tx']
-    # пропускная способность шага: в сценарии 1 оба направления, в сценарии 2 — ответы nginx
-    s['tput'] = s['gbps_rx'] if s['size'] else s['gbps']
+    # пропускная способность точки: в сценарии 2 — ответы nginx; в сценарии 1 — оба направления,
+    # а в однонаправленных шагах — поток: в b2a машина A (её лог здесь) принимает, в a2b — отдаёт
+    if s['size'] or meta.get('dir') == 'b2a':
+        s['tput'] = s['gbps_rx']
+    elif meta.get('dir') == 'a2b':
+        s['tput'] = s['gbps_tx']
+    else:
+        s['tput'] = s['gbps']
     # подпись в таблицах сценария 2: размер, а для режима не по умолчанию — и режим, "600 close-return"
     s['label'] = s['size'] + ('' if s['mode'] in ('', 'keepalive-file') else ' ' + s['mode'])
     s['gbps_core'] = s['tput'] / cores
@@ -209,7 +215,7 @@ def print_group(key, rows, pick, top):
             r['cores'], r['gbps_rx'], r['gbps_tx'], r['gbps'], r['mpps'], r['gbps_core'],
             pct(r['cpu_cli']), pct(r['cpu_srv']), r['drops'], r['retr'], '  <- оптимум' if r is pick else ''))
     print('максимум %.1f Gbps при N=%d; оптимум N=%d: %.1f Gbps (%.0f%% от максимума, %.1f Gbps на ядро)' % (
-        top['gbps'], top['cores'], pick['cores'], pick['gbps'], 100 * pick['gbps'] / best, pick['gbps_core']))
+        top['tput'], top['cores'], pick['cores'], pick['tput'], 100 * pick['tput'] / best, pick['gbps_core']))
 
 
 def print_compare(rows):
