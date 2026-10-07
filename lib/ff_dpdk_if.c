@@ -1632,14 +1632,21 @@ ff_gro_prepare(struct rte_mbuf *m)
         return 0;
     }
 
-    /* The IP length, not pkt_len, tells a pure ACK from Ethernet padding. */
+    /*
+     * The IP length, not pkt_len, tells a pure ACK from Ethernet padding.
+     * Pass only the flags rte_gro merges, or it returns the packet unprocessed
+     * ahead of the run and the packet overtakes earlier data of its flow:
+     * TCP4 takes ACK with PSH/FIN, TCP6 takes a plain ACK only.
+     */
     hdr_len = hdr_lens.l2_len + hdr_lens.l3_len + hdr_lens.l4_len;
     tcp = (const struct rte_tcp_hdr *)(l3 + hdr_lens.l3_len);
     if (m->data_len < hdr_len ||
         hdr_lens.l2_len + ip_len > m->pkt_len ||
         hdr_lens.l2_len + ip_len <= hdr_len ||
+        !(tcp->tcp_flags & RTE_TCP_ACK_FLAG) ||
         (tcp->tcp_flags & ~(RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG |
-            RTE_TCP_FIN_FLAG))) {
+            RTE_TCP_FIN_FLAG)) ||
+        (ptype == FF_GRO_PTYPE_TCP6 && tcp->tcp_flags != RTE_TCP_ACK_FLAG)) {
         return 0;
     }
 
