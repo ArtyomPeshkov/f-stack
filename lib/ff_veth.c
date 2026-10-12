@@ -1131,3 +1131,21 @@ ff_mbuf_set_timestamp(void *hdr, uint64_t timestamp) {
     m->m_flags |= M_TSTMP | M_TSTMP_HPREC;
 }
 
+void
+ff_mbuf_set_rx_csum(void *hdr, uint8_t ip_valid, uint8_t l4_valid) {
+    struct mbuf *m = (struct mbuf *)hdr;
+    if (ip_valid) {
+        m->m_pkthdr.csum_flags |= CSUM_IP_CHECKED | CSUM_IP_VALID;
+    }
+    if (l4_valid) {
+        m->m_pkthdr.csum_flags |= CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
+        m->m_pkthdr.csum_data = 0xffff;
+    }
+}
+
+void
+ff_mbuf_set_lro_info(void *hdr, uint16_t nsegs) {
+    struct mbuf *m = (struct mbuf *)hdr;
+    /* Same contract as FreeBSD's software LRO (tcp_lro.c). */
+    m->m_pkthdr.lro_nsegs = nsegs;
+}
