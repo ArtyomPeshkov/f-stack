@@ -1705,7 +1705,8 @@ ff_veth_input_flush(const struct ff_dpdk_if_context *ctx)
 
 /*
  * Hand a packet to the stack, deferred to the end of the RX burst when GRO
- * is enabled so that segments of the same flow can be merged.
+ * is enabled so that segments of the same flow can be merged. Every packet
+ * for the stack, ARP and NDP included, takes this path to keep its order.
  */
 static inline void
 ff_veth_input_defer(const struct ff_dpdk_if_context *ctx, struct rte_mbuf *m)
@@ -1966,7 +1967,7 @@ process_packets(uint16_t port_id, uint16_t queue_id, struct rte_mbuf **bufs,
                 }
             }
 #endif
-            ff_veth_input(ctx, rtem, 0);
+            ff_veth_input_defer(ctx, rtem);
 #ifdef FF_KNI
         } else if (enable_kni) {
             if (knictl_action == FF_KNICTL_ACTION_ALL_TO_KNI){
@@ -2004,7 +2005,9 @@ process_dispatch_ring(uint16_t port_id, uint16_t queue_id,
 
     if(nb_rb > 0) {
         process_packets(port_id, queue_id, pkts_burst, nb_rb, ctx, 1);
-        ff_veth_input_flush(ctx);
+        if (ctx->hw_features.rx_gro) {
+            ff_veth_input_flush(ctx);
+        }
     }
 
     return nb_rb;
@@ -2621,8 +2624,10 @@ main_loop(void *arg)
                 process_packets(port_id, queue_id, &pkts_burst[j], 1, ctx, 0);
             }
 
-            /* Hand the burst to the stack, merged by GRO if enabled */
-            ff_veth_input_flush(ctx);
+            /* Hand the burst to the stack, merged by GRO */
+            if (ctx->hw_features.rx_gro) {
+                ff_veth_input_flush(ctx);
+            }
         }
 
         process_msg_ring(qconf->proc_id, pkts_burst);
